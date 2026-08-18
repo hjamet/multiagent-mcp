@@ -205,7 +205,10 @@ class DaemonServer:
     async def handle_join(self, handle: str, name: str = "") -> dict:
         """Register participant, broadcast arrival notice if >=2 active, wake waiting clients."""
         canonical = normalize_handle(handle)
+        unread = self._get_unread_messages(canonical)
         participant = await self.room.join_room(handle=canonical, name=name)
+        participant.last_read_seq_id = self.room.seq_counter
+        self.room._save_state()
 
         # Wake waiting clients (arrival notice unblocks peers)
         self._wake_all()
@@ -221,6 +224,7 @@ class DaemonServer:
             "status": "joined",
             "participant": participant.model_dump(mode="json"),
             "active_turn": self.room.active_turn,
+            "new_messages": [m.model_dump(mode="json") for m in unread],
             "active_participants": active_list,
             "current_queue": list(self.room.turn_queue),
             "system_notice": notice or f"Joined room. Active participants: {active_count}",
@@ -233,17 +237,20 @@ class DaemonServer:
         private: Optional[Union[list[str], bool]] = False,
     ) -> dict:
         """Post a message, wake other participants, and wait for sender's next turn."""
+        self.room._load_state()
         canonical_sender = normalize_handle(sender)
+        if canonical_sender not in self.room.participants:
+            await self.room.join_room(canonical_sender)
+            self.room._load_state()
+
+        participant = self.room.participants[canonical_sender]
+
         msg = await self.room.post_message(
             sender=canonical_sender,
             content=content,
             private=private,
         )
-
-        # Update sender's read cursor to the message just posted
-        if canonical_sender in self.room.participants:
-            self.room.participants[canonical_sender].last_read_seq_id = self.room.seq_counter
-            self.room._save_state()
+        participant.last_read_seq_id = msg.seq_id
 
         # Wake up relevant participants in memory
         if not msg.is_private:
@@ -254,45 +261,35 @@ class DaemonServer:
                 to_wake.add(self.room.active_turn)
             self._wake_handles(to_wake)
 
-        # Wait for sender's next turn or incoming messages
-        if canonical_sender not in self.room.participants:
-            raise ValueError(f"Participant {canonical_sender} not registered in room")
+        # Wait in loop until unread messages arrive or it becomes sender's turn
+        while True:
+            unread = [
+                m
+                for m in self.room.messages
+                if m.seq_id > msg.seq_id
+                and m.sender != canonical_sender
+                and (not m.is_private or canonical_sender in m.recipients)
+            ]
 
-        participant = self.room.participants[canonical_sender]
-        unread = self._get_unread_messages(canonical_sender)
+            if self.room.active_turn == canonical_sender or len(unread) > 0:
+                participant.last_read_seq_id = self.room.seq_counter
+                self.room._save_state()
+                turn_res = self._build_turn_result(canonical_sender, unread)
+                return turn_res.model_dump(mode="json")
 
-        # Fast path: active turn or unread messages already available
-        if self.room.active_turn == canonical_sender or len(unread) > 0:
-            participant.last_read_seq_id = self.room.seq_counter
-            self.room._save_state()
-            turn_res = self._build_turn_result(canonical_sender, unread)
-            return turn_res.model_dump(mode="json")
+            # Await in-memory future with zero disk polling
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            self.waiting_clients.setdefault(canonical_sender, []).append(fut)
 
-        # Slow path: await in-memory future with zero disk polling
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        self.waiting_clients.setdefault(canonical_sender, []).append(fut)
-
-        try:
-            await fut
-        finally:
-            if canonical_sender in self.waiting_clients:
-                if fut in self.waiting_clients[canonical_sender]:
-                    self.waiting_clients[canonical_sender].remove(fut)
-                if not self.waiting_clients[canonical_sender]:
-                    del self.waiting_clients[canonical_sender]
-
-        # Re-check state after in-memory wakeup
-        if canonical_sender not in self.room.participants:
-            raise ValueError(f"Participant {canonical_sender} not registered in room")
-
-        participant = self.room.participants[canonical_sender]
-        unread = self._get_unread_messages(canonical_sender)
-        participant.last_read_seq_id = self.room.seq_counter
-        self.room._save_state()
-
-        turn_res = self._build_turn_result(canonical_sender, unread)
-        return turn_res.model_dump(mode="json")
+            try:
+                await fut
+            finally:
+                if canonical_sender in self.waiting_clients:
+                    if fut in self.waiting_clients[canonical_sender]:
+                        self.waiting_clients[canonical_sender].remove(fut)
+                    if not self.waiting_clients[canonical_sender]:
+                        del self.waiting_clients[canonical_sender]
 
     def handle_list(self) -> dict:
         """Return full room and participant status."""
@@ -331,9 +328,20 @@ class DaemonServer:
                     content=req.get("content", ""),
                     private=req.get("private", False),
                 )
+            elif action in ("get_messages", "history", "read_messages"):
+                self.room._load_state()
+                canonical = normalize_handle(req.get("handle") or req.get("sender") or "")
+                since_seq = req.get("since_seq_id", 0)
+                msgs = [
+                    m.model_dump(mode="json")
+                    for m in self.room.messages
+                    if m.seq_id > since_seq
+                    and (not m.is_private or canonical in m.recipients or canonical == m.sender)
+                ]
+                res = {"status": "ok", "messages": msgs}
             elif action in ("list", "list_participants"):
                 res = self.handle_list()
-            elif action in ("stop", "shutdown"):
+            elif action in ("stop", "shutdown", "stop_daemon", "stop-daemon"):
                 res = await self.handle_stop()
             elif action in ("ping", "status"):
                 res = {

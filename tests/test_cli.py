@@ -391,6 +391,7 @@ def test_cli_file_backed_persistence_across_commands(tmp_path: Path, capsys):
     t_bob.start()
     t_send.join(timeout=2.0)
     assert not t_send.is_alive()
+    time.sleep(0.05)
 
     # 5. list
     capsys.readouterr()

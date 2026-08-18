@@ -273,24 +273,28 @@ class RoomManager:
         clean_content = msg.content.strip().replace("\r\n", "\n")
         lines = clean_content.split("\n")
         first_lines = lines[:4]
-        quoted = "\n> ".join(first_lines)
-        if len(lines) > 4:
-            quoted += "\n> *(...)*"
 
         if msg.is_private:
             recipients_str = ", ".join(msg.recipients)
-            return (
-                f"> [!WARNING]\n"
-                f"> 🔒 **Dernier message (Privé) :** **{msg.sender}** ➔ {recipients_str} à {time_str}\n"
-                f"> \n"
-                f"> {quoted}\n"
-            )
-        else:
+            quoted = "\n> > ".join(first_lines)
+            if len(lines) > 4:
+                quoted += "\n> > *(...)*"
             return (
                 f"> [!NOTE]\n"
-                f"> 💬 **Dernier message :** **{msg.sender}** à {time_str}\n"
+                f"> 🔒 **Dernier message (Privé) :** **{msg.sender}** ➔ {recipients_str} ({time_str})\n"
                 f"> \n"
-                f"> {quoted}\n"
+                f"> > {quoted}\n\n"
+            )
+        else:
+            recipients_str = ", ".join(msg.recipients)
+            quoted = "\n> ".join(first_lines)
+            if len(lines) > 4:
+                quoted += "\n> *(...)*"
+            return (
+                f"> [!NOTE]\n"
+                f"> 💬 **Dernier message :** **{msg.sender}** ➔ {recipients_str} ({time_str})\n"
+                f"> \n"
+                f"> {quoted}\n\n"
             )
 
     def _format_participants_table(self) -> str:
@@ -619,14 +623,13 @@ class RoomManager:
             clean_content = content.replace("\r\n", "\n")
             content_indented = "\n> ".join(clean_content.split("\n"))
             entry = (
-                f"> [!WARNING] 🔒 Message Privé : {canonical_sender} ➔ {recipients_str} ({time_str})\n"
-                f"> \n"
+                f"### 🔒 [Privé] {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
                 f"> {content_indented}\n\n"
                 f"---"
             )
         else:
             entry = (
-                f"### {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
+                f"### 💬 {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
                 f"{content}\n\n"
                 f"---"
             )

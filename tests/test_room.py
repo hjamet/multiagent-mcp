@@ -229,8 +229,8 @@ async def test_explicit_private_recipients_list_no_leak(tmp_path: Path):
 
     # Verify transcript header & warning callouts
     file_content = room_file.read_text(encoding="utf-8")
-    assert "> [!WARNING] 🔒 Message Privé : @Claire ➔ @MJ" in file_content
-    assert "➔ @Antoine" not in file_content.split("> [!WARNING] 🔒 Message Privé :")[1].split("\n\n")[0]
+    assert "### 🔒 [Privé] @Claire ➔ @MJ" in file_content
+    assert "➔ @Antoine" not in file_content.split("### 🔒 [Privé]")[1].split("\n\n")[0]
     assert "> 🔒 **Dernier message (Privé) :** **@Claire** ➔ @MJ" in file_content
 
 
@@ -260,16 +260,16 @@ async def test_private_message_visibility_and_formatting(tmp_path: Path):
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(rm.wait_for_turn("@Charlie"), timeout=0.05)
 
-    # Transcript file has private warning callout and header
+    # Transcript file has private heading and header callout
     file_content = room_file.read_text(encoding="utf-8")
-    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content
+    assert "### 🔒 [Privé] @Alice ➔ @Bob" in file_content
     assert "> Secret message for @Bob" in file_content
     assert "> 🔒 **Dernier message (Privé) :** **@Alice** ➔ @Bob" in file_content
 
 
 @pytest.mark.asyncio
 async def test_callout_colors_private_vs_public(tmp_path: Path):
-    """Test that public messages render [!NOTE] and private messages render [!WARNING]."""
+    """Test that public and private messages render proper headings and callouts."""
     room_file = tmp_path / "callout_test.md"
     rm = RoomManager()
     rm.init_room(filepath=str(room_file), participants=["@Alice", "@Bob"])
@@ -282,9 +282,9 @@ async def test_callout_colors_private_vs_public(tmp_path: Path):
 
     # Header must have [!NOTE] for public message
     assert "> [!NOTE]" in content_pub
-    assert "> 💬 **Dernier message :** **@Alice** à " in content_pub
-    # Transcript must have standard markdown heading
-    assert "### @Alice ➔ @Bob" in content_pub
+    assert "> 💬 **Dernier message :** **@Alice** ➔ @Bob" in content_pub
+    # Transcript must have standard markdown heading with icon
+    assert "### 💬 @Alice ➔ @Bob" in content_pub
     assert "Message public pour @Bob\nDeuxième ligne\n\n---" in content_pub
 
     # 2. Post a private message
@@ -295,12 +295,12 @@ async def test_callout_colors_private_vs_public(tmp_path: Path):
     )
     content_priv = room_file.read_text(encoding="utf-8")
 
-    # Header must now have [!WARNING] for private message
-    assert "> [!WARNING]" in content_priv
-    assert "> 🔒 **Dernier message (Privé) :** **@Bob** ➔ @Alice à " in content_priv
-    # Transcript must contain the warning callout with indented content
-    assert "> [!WARNING] 🔒 Message Privé : @Bob ➔ @Alice" in content_priv
-    assert "> \n> Ligne 1 privée\n> Ligne 2 secrète\n\n---" in content_priv
+    # Header must have [!NOTE] with lock icon for private message
+    assert "> [!NOTE]" in content_priv
+    assert "> 🔒 **Dernier message (Privé) :** **@Bob** ➔ @Alice" in content_priv
+    # Transcript must contain the private header and indented quote
+    assert "### 🔒 [Privé] @Bob ➔ @Alice" in content_priv
+    assert "> Ligne 1 privée\n> Ligne 2 secrète\n\n---" in content_priv
 
 
 @pytest.mark.asyncio

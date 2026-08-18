@@ -111,7 +111,7 @@ async def test_daemon_turn_coordination_and_in_memory_wakeup(tmp_path: Path):
         # Alice joins
         await client_alice.join("@Alice")
 
-        # Bob joins
+        # Bob joins -> triggers arrival notice for Alice
         await client_bob.join("@Bob")
 
         # Alice sends message addressing Bob and blocks waiting for next turn
@@ -122,8 +122,11 @@ async def test_daemon_turn_coordination_and_in_memory_wakeup(tmp_path: Path):
             )
         )
 
-        # Give small tick to ensure Alice is waiting
-        await asyncio.sleep(0.02)
+        # Wait for Alice to enter waiting state
+        for _ in range(50):
+            if "@Alice" in server.waiting_clients:
+                break
+            await asyncio.sleep(0.01)
         assert "@Alice" in server.waiting_clients
 
         # Bob sends reply back to Alice and blocks waiting for next turn

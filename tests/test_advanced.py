@@ -132,13 +132,13 @@ async def test_mixed_private_public_with_unjoined_agents(tmp_path: Path):
     assert len(charlie_turn.new_messages) == 1
     assert "Bienvenue à tous @all !" in charlie_turn.new_messages[0].content
 
-    # Verify transcript file callouts for both private (WARNING) and public (NOTE)
+    # Verify transcript file formatting for both private and public messages
     file_content = room_file.read_text(encoding="utf-8")
-    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content
+    assert "### 🔒 [Privé] @Alice ➔ @Bob" in file_content
     assert "> Hey @Bob, attendons avant de sonder @Charlie et @David." in file_content
-    assert "### @Bob ➔ " in file_content
+    assert "### 💬 @Bob ➔ " in file_content
     assert "> [!NOTE]" in file_content
-    assert "> 💬 **Dernier message :** **@Bob** à" in file_content
+    assert "> 💬 **Dernier message :** **@Bob** ➔ " in file_content
 
 
 @pytest.mark.asyncio

@@ -117,7 +117,7 @@ def spawn_daemon() -> None:
         )
 
 
-def ensure_daemon(max_wait_seconds: float = 2.0, host: str = DEFAULT_HOST) -> int:
+def ensure_daemon(max_wait_seconds: float = 5.0, host: str = DEFAULT_HOST) -> int:
     """Ensure the daemon is running and return its port number."""
     port = get_daemon_port()
     if port and is_port_reachable(port, host=host):
