@@ -55,7 +55,7 @@ async def test_join_conversation_first_and_subsequent_participants():
     async def join_alice():
         nonlocal alice_res
         alice_res = await join_conversation(
-            handle="@Alice", name="Alice Wonderland", timeout_seconds=2.0
+            handle="@Alice", name="Alice Wonderland"
         )
 
     task = asyncio.create_task(join_alice())
@@ -112,19 +112,22 @@ async def test_send_message_blocking_turn_taking(tmp_path: Path):
         bob_res = await send_message(
             sender="@Bob",
             content="Hello @Alice, what is your status?",
-            timeout_seconds=2.0,
         )
 
     bob_task = asyncio.create_task(bob_turn())
     await asyncio.sleep(0.05)
 
     # Alice replies to Bob
-    alice_res = await send_message(
-        sender="@Alice",
-        content="All systems operational @Bob!",
-        timeout_seconds=2.0,
-    )
+    alice_res: TurnResult | None = None
 
+    async def alice_turn():
+        nonlocal alice_res
+        alice_res = await send_message(
+            sender="@Alice",
+            content="All systems operational @Bob!",
+        )
+
+    alice_task = asyncio.create_task(alice_turn())
     await bob_task
 
     # Bob should unblock and see ONLY the new message from Alice
@@ -132,6 +135,11 @@ async def test_send_message_blocking_turn_taking(tmp_path: Path):
     assert len(bob_res.new_messages) == 1
     assert bob_res.new_messages[0].content == "All systems operational @Bob!"
     assert bob_res.new_messages[0].sender == "@Alice"
+
+    # Bob replies to Alice to unblock Alice
+    await room.post_message(sender="@Bob", content="Thanks @Alice!")
+    await alice_task
+    assert alice_res is not None
 
 
 @pytest.mark.asyncio
@@ -142,9 +150,9 @@ async def test_send_message_private_explicit_recipients():
     await room.join_room("@Charlie")
 
     # Catch up unread seqs
-    await room.wait_for_turn("@Bob", timeout_seconds=0.0)
-    await room.wait_for_turn("@Charlie", timeout_seconds=0.0)
-
+    await room.wait_for_turn("@Bob")
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(room.wait_for_turn("@Charlie"), timeout=0.05)
 
     # Alice sends private message targeting only @Bob, even though @Charlie is mentioned in text
     alice_task = asyncio.create_task(
@@ -152,21 +160,22 @@ async def test_send_message_private_explicit_recipients():
             sender="@Alice",
             content="Dis @Bob, je veux vérifier un point sur @Charlie",
             private=["@Bob"],
-            timeout_seconds=0.1,
         )
     )
     await asyncio.sleep(0.05)
 
     # Bob checks unread messages
-    bob_res = await room.wait_for_turn("@Bob", timeout_seconds=1.0)
+    bob_res = await room.wait_for_turn("@Bob")
     assert len(bob_res.new_messages) == 1
     assert bob_res.new_messages[0].is_private is True
     assert bob_res.new_messages[0].recipients == ["@Bob"]
 
-    # Charlie checks unread messages -> must be empty
-    charlie_res = await room.wait_for_turn("@Charlie", timeout_seconds=0.1)
-    assert len(charlie_res.new_messages) == 0
+    # Charlie checks unread messages -> must timeout because Charlie has no unread messages
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(room.wait_for_turn("@Charlie"), timeout=0.1)
 
+    # Unblock Alice
+    await room.post_message(sender="@Bob", content="Reçu @Alice")
     await alice_task
 
     # Validate file transcript has WARNING callouts for private message
@@ -186,7 +195,6 @@ async def test_send_message_mention_validation_error():
         await send_message(
             sender="@Alice",
             content="Message with no mentions at all",
-            timeout_seconds=0.1,
         )
     assert "Écrivez à au moins l'une des personnes suivantes : @Bob" in str(exc.value)
 
@@ -237,7 +245,7 @@ async def test_mcp_state_file_persistence(tmp_path: Path):
 
     # Join Alice
     alice_task = asyncio.create_task(
-        join_conversation(handle="@Alice", timeout_seconds=0.1)
+        join_conversation(handle="@Alice")
     )
     await asyncio.sleep(0.05)
 
@@ -245,6 +253,8 @@ async def test_mcp_state_file_persistence(tmp_path: Path):
     state2 = json.loads(state_file.read_text(encoding="utf-8"))
     assert state2["participants"]["@Alice"]["status"] == "active"
 
+    # Unblock Alice by joining Bob
+    await join_conversation(handle="@Bob")
     await alice_task
 
 

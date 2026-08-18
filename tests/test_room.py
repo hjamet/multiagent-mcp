@@ -90,7 +90,7 @@ async def test_join_room_and_arrival_broadcast(tmp_path: Path):
 
     async def wait_alice():
         nonlocal alice_woken
-        res = await rm.wait_for_turn("@Alice", timeout_seconds=2.0)
+        res = await rm.wait_for_turn("@Alice")
         if len(res.new_messages) > 0 and "@Bob est arrivé" in res.new_messages[0].content:
             alice_woken = True
 
@@ -203,9 +203,8 @@ async def test_explicit_private_recipients_list_no_leak(tmp_path: Path):
     await rm.join_room("@MJ")
     await rm.join_room("@Antoine")
 
-    # Clear previous read seqs
-    await rm.wait_for_turn("@Antoine", timeout_seconds=0.0)
-    await rm.wait_for_turn("@MJ", timeout_seconds=0.0)
+    # Catch up MJ's arrival notices
+    await rm.wait_for_turn("@MJ")
 
     # Claire sends private message to MJ discussing Antoine
     content = "Je veux sonder @Antoine discrètement pour connaître son avis."
@@ -218,15 +217,15 @@ async def test_explicit_private_recipients_list_no_leak(tmp_path: Path):
     assert rm.active_turn == "@MJ"
 
     # MJ receives the message
-    mj_res = await rm.wait_for_turn("@MJ", timeout_seconds=1.0)
+    mj_res = await rm.wait_for_turn("@MJ")
     assert mj_res.status == "your_turn"
     assert len(mj_res.new_messages) == 1
     assert mj_res.new_messages[0].content == content
     assert mj_res.new_messages[0].is_private is True
 
     # Antoine checks messages -> must NOT receive this private message
-    antoine_res = await rm.wait_for_turn("@Antoine", timeout_seconds=0.1)
-    assert len(antoine_res.new_messages) == 0
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(rm.wait_for_turn("@Antoine"), timeout=0.05)
 
     # Verify transcript header & warning callouts
     file_content = room_file.read_text(encoding="utf-8")
@@ -244,24 +243,22 @@ async def test_private_message_visibility_and_formatting(tmp_path: Path):
     await rm.join_room("@Bob")
     await rm.join_room("@Charlie")
 
-    # Clear previous read seqs
-    await rm.wait_for_turn("@Charlie", timeout_seconds=0.0)
-    await rm.wait_for_turn("@Bob", timeout_seconds=0.0)
-
+    # Catch up Bob's arrival notices
+    await rm.wait_for_turn("@Bob")
 
     # Alice sends private message to Bob with boolean is_private=True
     await rm.post_message(sender="@Alice", content="Secret message for @Bob", private=True)
 
     # Bob checks turn
-    bob_res = await rm.wait_for_turn("@Bob", timeout_seconds=1.0)
+    bob_res = await rm.wait_for_turn("@Bob")
     assert bob_res.status == "your_turn"
     assert len(bob_res.new_messages) == 1
     assert bob_res.new_messages[0].content == "Secret message for @Bob"
     assert bob_res.new_messages[0].is_private is True
 
     # Charlie checks messages -> should NOT see the private message
-    charlie_res = await rm.wait_for_turn("@Charlie", timeout_seconds=0.1)
-    assert len(charlie_res.new_messages) == 0
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(rm.wait_for_turn("@Charlie"), timeout=0.05)
 
     # Transcript file has private warning callout and header
     file_content = room_file.read_text(encoding="utf-8")
@@ -318,7 +315,7 @@ async def test_wait_for_turn_unread_tracking(tmp_path: Path):
     await rm.post_message(sender="@Alice", content="Question 1 @Bob")
 
     # Bob waits and gets message 1
-    res1 = await rm.wait_for_turn("@Bob", timeout_seconds=1.0)
+    res1 = await rm.wait_for_turn("@Bob")
     assert res1.status == "your_turn"
     assert len(res1.new_messages) == 1
     assert res1.new_messages[0].content == "Question 1 @Bob"
@@ -326,10 +323,9 @@ async def test_wait_for_turn_unread_tracking(tmp_path: Path):
     # Bob posts reply to Alice
     await rm.post_message(sender="@Bob", content="Answer 1 @Alice")
 
-    # Bob calls wait_for_turn immediately without new messages -> should timeout
-    res_empty = await rm.wait_for_turn("@Bob", timeout_seconds=0.2)
-    assert res_empty.status == "timeout"
-    assert len(res_empty.new_messages) == 0
+    # Bob calls wait_for_turn immediately without new messages -> should block and timeout with asyncio.wait_for
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(rm.wait_for_turn("@Bob"), timeout=0.05)
 
 
 @pytest.mark.asyncio
@@ -419,7 +415,7 @@ async def test_sender_does_not_lose_earlier_unread_messages_after_posting(tmp_pa
     await rm.join_room("@Charlie")
 
     # Bob clears arrival notices before conversation starts
-    await rm.wait_for_turn("@Bob", timeout_seconds=0.0)
+    await rm.wait_for_turn("@Bob")
 
     # 1. Alice posts a message addressing Bob
     msg_alice = await rm.post_message(sender="@Alice", content="Salut @Bob, voici la tâche.")
@@ -431,7 +427,7 @@ async def test_sender_does_not_lose_earlier_unread_messages_after_posting(tmp_pa
     assert bob_seq > alice_seq
 
     # 3. Bob now calls wait_for_turn -> Bob MUST receive Alice's message (alice_seq)
-    bob_res = await rm.wait_for_turn("@Bob", timeout_seconds=0.1)
+    bob_res = await rm.wait_for_turn("@Bob")
     assert len(bob_res.new_messages) == 1
     assert bob_res.new_messages[0].seq_id == alice_seq
     assert bob_res.new_messages[0].content == "Salut @Bob, voici la tâche."
@@ -440,9 +436,9 @@ async def test_sender_does_not_lose_earlier_unread_messages_after_posting(tmp_pa
     # Bob's cursor is now updated to the latest sequence
     assert rm.participants["@Bob"].last_read_seq_id == rm.seq_counter
 
-    # Calling wait_for_turn again returns no new messages
-    bob_res2 = await rm.wait_for_turn("@Bob", timeout_seconds=0.1)
-    assert len(bob_res2.new_messages) == 0
+    # Calling wait_for_turn again blocks since no new messages exist
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(rm.wait_for_turn("@Bob"), timeout=0.05)
 
 
 @pytest.mark.asyncio
@@ -499,15 +495,15 @@ async def test_cross_instance_turn_coordination_and_sync(tmp_path: Path):
     await rm_b.join_room("@Bob")
 
     # Catch up arrivals
-    await rm_a.wait_for_turn("@Alice", timeout_seconds=0.0)
-    await rm_b.wait_for_turn("@Bob", timeout_seconds=0.0)
+    await rm_a.wait_for_turn("@Alice")
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(rm_b.wait_for_turn("@Bob"), timeout=0.05)
 
     # Process A posts message to Bob
     await rm_a.post_message(sender="@Alice", content="Action required @Bob")
 
-
     # Process B waits and catches up
-    res_b = await rm_b.wait_for_turn("@Bob", timeout_seconds=1.0)
+    res_b = await rm_b.wait_for_turn("@Bob")
     assert res_b.status == "your_turn"
     assert len(res_b.new_messages) == 1
     assert res_b.new_messages[0].content == "Action required @Bob"
@@ -517,7 +513,7 @@ async def test_cross_instance_turn_coordination_and_sync(tmp_path: Path):
     await rm_b.post_message(sender="@Bob", content="Done @Alice!")
 
     # Process A waits and catches up
-    res_a = await rm_a.wait_for_turn("@Alice", timeout_seconds=1.0)
+    res_a = await rm_a.wait_for_turn("@Alice")
     assert res_a.status == "your_turn"
     assert len(res_a.new_messages) == 1
     assert res_a.new_messages[0].content == "Done @Alice!"
@@ -535,7 +531,7 @@ async def test_state_recovery_after_simulated_restart(tmp_path: Path):
     await rm1.join_room("@Alice")
     await rm1.join_room("@Bob")
     await rm1.post_message(sender="@Alice", content="Message 1 @Bob")
-    await rm1.wait_for_turn("@Bob", timeout_seconds=0.1)
+    await rm1.wait_for_turn("@Bob")
     await rm1.post_message(sender="@Bob", content="Message 2 @Alice")
 
     # Simulate process termination: rm1 is discarded

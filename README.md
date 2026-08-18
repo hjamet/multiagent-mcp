@@ -180,9 +180,10 @@ The server exposes 4 FastMCP tools:
 classDiagram
     class MultiAgentHub {
         +init_conversation(filepath, participants, topic) dict
-        +join_conversation(handle, name, timeout_seconds) TurnResult
+        +join_conversation(handle, name) TurnResult
         +list_participants() dict
-        +send_message(sender, content, is_private, timeout_seconds) TurnResult
+        +wait_for_turn(handle) TurnResult
+        +send_message(sender, content, is_private) TurnResult
     }
 ```
 
@@ -217,7 +218,6 @@ Registers a participant in the room. Handles arrival synchronization barriers an
 |---|---|---|---|---|
 | `handle` | `str` | Yes | — | Participant handle (e.g. `'@Alice'` or `'Alice'`). |
 | `name` | `str` | No | `""` | Optional display name (defaults to cleaned handle). |
-| `timeout_seconds` | `float` | No | `45.0` | Timeout in seconds if blocking for turn. |
 
 **Returns (`TurnResult`):**
 ```json
@@ -261,7 +261,29 @@ Queries current room participants, active turn speaker, turn queue, and total me
 
 ---
 
-### 4. `send_message`
+### 4. `wait_for_turn`
+Waits indefinitely for your turn or new incoming messages.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `handle` | `str` | Yes | — | Participant handle (e.g. `'@Alice'`). |
+
+**Returns (`TurnResult`):**
+```json
+{
+  "status": "your_turn",
+  "active_turn": "@Alice",
+  "new_messages": [],
+  "current_queue": ["@Bob"],
+  "active_participants": ["@Alice", "@Bob", "@user"],
+  "system_notice": null
+}
+```
+
+---
+
+### 5. `send_message`
 Posts a public or private message to the room. Validates mentions, updates the turn queue, appends to the Markdown file, and puts the sender into a waiting loop until it is their next turn or until a new message arrives, returning **only new unread messages** upon unblocking.
 
 **Parameters:**
@@ -270,7 +292,6 @@ Posts a public or private message to the room. Validates mentions, updates the t
 | `sender` | `str` | Yes | — | Sender handle (e.g. `'@Alice'`). |
 | `content` | `str` | Yes | — | Message content. **Must include at least one valid `@recipient` mention.** |
 | `is_private` | `bool` | No | `False` | If `True`, message is only visible to sender and tagged recipients. |
-| `timeout_seconds` | `float` | No | `45.0` | Max seconds to wait before yielding turn status. |
 
 **Returns (`TurnResult`):**
 ```json

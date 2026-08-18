@@ -57,7 +57,6 @@ def init_conversation(
 async def join_conversation(
     handle: str,
     name: str = "",
-    timeout_seconds: float = 45.0,
 ) -> TurnResult:
     """Join the multi-agent conversation room.
 
@@ -69,7 +68,6 @@ async def join_conversation(
     Args:
         handle: Your participant handle (e.g. '@Alice' or 'Alice').
         name: Optional display name.
-        timeout_seconds: Timeout in seconds if blocking for turn.
 
     Returns:
         TurnResult containing turn status, active turn, queue, and unread messages.
@@ -86,15 +84,37 @@ async def join_conversation(
 
     if is_first and active_count <= 1:
         # First active participant: immediately blocks/waits until another joins or is mentioned
-        return await room.wait_for_turn(canonical, timeout_seconds=timeout_seconds)
+        return await room.wait_for_turn(canonical)
     else:
-        # Subsequent or rejoining participant: fetch pending unread messages immediately
-        turn_res = await room.wait_for_turn(canonical, timeout_seconds=0.0)
-        if turn_res.status not in ("your_turn", "message_received"):
-            turn_res.status = "joined"
-        if not turn_res.system_notice:
-            turn_res.system_notice = f"Joined room. Active participants: {active_count}"
-        return turn_res
+        # Subsequent or rejoining participant: fetch pending unread messages or return current state
+        room._load_state()
+        participant = room.participants[canonical]
+        unread = [
+            m
+            for m in room.messages
+            if m.seq_id > participant.last_read_seq_id
+            and m.sender != canonical
+            and (not m.is_private or canonical in m.recipients)
+        ]
+        if room.active_turn == canonical or len(unread) > 0:
+            return await room.wait_for_turn(canonical)
+        else:
+            participant.last_read_seq_id = room.seq_counter
+            room._save_state()
+            active_list = [p.handle for p in room.participants.values() if p.status == "active"]
+            notice = (
+                f"Transcript: '{room.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
+                if room.filepath
+                else None
+            )
+            return TurnResult(
+                status="joined",
+                active_turn=room.active_turn,
+                new_messages=[],
+                current_queue=list(room.turn_queue),
+                active_participants=active_list,
+                system_notice=notice or f"Joined room. Active participants: {active_count}",
+            )
 
 
 @mcp.tool()
@@ -107,13 +127,27 @@ def list_participants() -> dict:
     return room.list_participants()
 
 
+@mcp.tool()
+async def wait_for_turn(
+    handle: str,
+) -> TurnResult:
+    """Wait indefinitely for your turn or incoming messages.
+
+    Args:
+        handle: Your participant handle (e.g. '@Alice').
+
+    Returns:
+        TurnResult containing turn status and new unread messages upon unblocking.
+    """
+    canonical = normalize_handle(handle)
+    return await room.wait_for_turn(agent_id=canonical)
+
 
 @mcp.tool()
 async def send_message(
     sender: str,
     content: str,
     private: Optional[Union[list[str], bool]] = False,
-    timeout_seconds: float = 45.0,
     is_private: Optional[Union[list[str], bool]] = None,
 ) -> TurnResult:
     """Post a message to the conversation room with mandatory @mentions or private recipients list.
@@ -135,7 +169,6 @@ async def send_message(
         sender: Your participant handle (e.g. '@Alice').
         content: Message content with @mentions (e.g. '@Bob', '@all').
         private: List of recipient handles (e.g. ['@MJ']) or bool (True for private, False for public).
-        timeout_seconds: Max seconds to wait before yielding turn status.
         is_private: Optional backward compatibility alias for private.
 
     Returns:
@@ -153,5 +186,4 @@ async def send_message(
 
     return await room.wait_for_turn(
         agent_id=canonical_sender,
-        timeout_seconds=timeout_seconds,
     )

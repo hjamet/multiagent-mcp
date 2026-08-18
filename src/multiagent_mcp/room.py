@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import time
 from typing import Optional, Union
 
@@ -56,6 +57,10 @@ class RoomManager:
 
         if self.filepath and not self._state_file:
             self._state_file = Path(f"{self.filepath}.state.json")
+        elif not self.filepath and self._state_file:
+            sf_str = str(self._state_file)
+            if sf_str.endswith(".state.json") and not sf_str.endswith("default_room.state.json"):
+                self.filepath = Path(sf_str[:-11])
 
     def _get_state_file(self) -> Path:
         """Get the active state file path."""
@@ -71,6 +76,10 @@ class RoomManager:
                 p_str = data.get("state_file")
                 if p_str:
                     self._state_file = Path(p_str)
+                    if self.filepath is None:
+                        sf_str = str(self._state_file)
+                        if sf_str.endswith(".state.json") and not sf_str.endswith("default_room.state.json"):
+                            self.filepath = Path(sf_str[:-11])
                     return self._state_file
             except Exception:
                 pass
@@ -95,10 +104,15 @@ class RoomManager:
     def _save_state(self) -> None:
         """Atomically persist current room state to JSON file."""
         state_file = self._get_state_file()
+        if self.filepath is None and self._state_file:
+            sf_str = str(self._state_file)
+            if sf_str.endswith(".state.json") and not sf_str.endswith("default_room.state.json"):
+                self.filepath = Path(sf_str[:-11])
         try:
             state_file.parent.mkdir(parents=True, exist_ok=True)
+            filepath_str = str(self.filepath.resolve()) if self.filepath else None
             state_data = {
-                "filepath": str(self.filepath.resolve()) if self.filepath else None,
+                "filepath": filepath_str,
                 "topic": self.topic,
                 "seq_counter": self.seq_counter,
                 "active_turn": self.active_turn,
@@ -130,8 +144,8 @@ class RoomManager:
                     json.dumps(state_data, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[RoomManager] Error saving state to {state_file}: {e}", file=sys.stderr)
 
     def _load_state(self) -> bool:
         """Load and synchronize room state from JSON file if available."""
@@ -153,12 +167,16 @@ class RoomManager:
                 continue
 
         if not data or not isinstance(data, dict):
+            if state_file.exists() and state_file.stat().st_size > 0:
+                raise RuntimeError(f"CRITICAL: Failed to load state file from {self._state_file}")
             return False
 
         if data.get("filepath"):
             self.filepath = Path(data["filepath"])
-        elif "filepath" in data and data["filepath"] is None:
-            self.filepath = None
+        elif self.filepath is None and self._state_file:
+            sf_str = str(self._state_file)
+            if sf_str.endswith(".state.json") and not sf_str.endswith("default_room.state.json"):
+                self.filepath = Path(sf_str[:-11])
 
         self.topic = data.get("topic", "")
         self.seq_counter = data.get("seq_counter", 0)
@@ -315,51 +333,68 @@ class RoomManager:
 
     def _update_file_header(self) -> None:
         """Write or refresh the markdown transcript file header and live priority table."""
+        if self.filepath is None and self._state_file:
+            sf_str = str(self._state_file)
+            if sf_str.endswith(".state.json") and not sf_str.endswith("default_room.state.json"):
+                self.filepath = Path(sf_str[:-11])
+
         if not self.filepath:
             return
 
-        callout = self._format_last_message_callout()
-        table = self._format_participants_table()
+        try:
+            callout = self._format_last_message_callout()
+            table = self._format_participants_table()
 
-        header = [
-            "# Multi-Agent Room",
-            "",
-            f"- **Fichier :** `{self.filepath.as_posix()}`",
-            f"- **Sujet :** {self.topic if self.topic else 'Discussion multi-agents'}",
-            f"- **Initialisé le :** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-        ]
-        if callout:
-            header.append(callout)
-        header.extend([
-            table,
-            "",
-            "---",
-            "",
-            "## Fil de discussion",
-            "",
-        ])
-        header_text = "\n".join(header)
+            header = [
+                "# Multi-Agent Room",
+                "",
+                f"- **Fichier :** `{self.filepath.as_posix()}`",
+                f"- **Sujet :** {self.topic if self.topic else 'Discussion multi-agents'}",
+                f"- **Initialisé le :** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "",
+            ]
+            if callout:
+                header.append(callout)
+            header.extend([
+                table,
+                "",
+                "---",
+                "",
+                "## Fil de discussion",
+                "",
+            ])
+            header_text = "\n".join(header)
 
-        self.filepath.parent.mkdir(parents=True, exist_ok=True)
-        if self.filepath.exists():
-            current_text = self.filepath.read_text(encoding="utf-8")
-            marker = "## Fil de discussion\n"
-            if marker in current_text:
-                _, body = current_text.split(marker, 1)
-                body = body.lstrip("\n")
-                if body:
-                    self.filepath.write_text(header_text + "\n" + body, encoding="utf-8")
-                    return
-        self.filepath.write_text(header_text, encoding="utf-8")
+            self.filepath.parent.mkdir(parents=True, exist_ok=True)
+            if self.filepath.exists():
+                current_text = self.filepath.read_text(encoding="utf-8")
+                marker = "## Fil de discussion\n"
+                if marker in current_text:
+                    _, body = current_text.split(marker, 1)
+                    body = body.lstrip("\n")
+                    if body:
+                        self.filepath.write_text(header_text + "\n" + body, encoding="utf-8")
+                        return
+            self.filepath.write_text(header_text, encoding="utf-8")
+        except Exception as e:
+            print(f"[RoomManager] Error updating file header ({self.filepath}): {e}", file=sys.stderr)
 
     def _append_to_file(self, formatted_entry: str) -> None:
         """Append text to the markdown transcript file."""
+        if self.filepath is None and self._state_file:
+            sf_str = str(self._state_file)
+            if sf_str.endswith(".state.json") and not sf_str.endswith("default_room.state.json"):
+                self.filepath = Path(sf_str[:-11])
+
         if not self.filepath:
             return
-        self.filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.filepath, "a", encoding="utf-8") as f:
-            f.write(formatted_entry + "\n\n")
+
+        try:
+            self.filepath.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(formatted_entry + "\n\n")
+        except Exception as e:
+            print(f"[RoomManager] Error appending to transcript ({self.filepath}): {e}", file=sys.stderr)
 
     def init_room(
         self,
@@ -372,7 +407,7 @@ class RoomManager:
         if self.filepath:
             self._state_file = Path(f"{self.filepath}.state.json")
         else:
-            self._state_file = DEFAULT_STATE_FILE
+            self._state_file = get_default_state_file()
         self._set_active_pointer()
 
         self.topic = topic
@@ -643,17 +678,14 @@ class RoomManager:
     async def wait_for_turn(
         self,
         agent_id: str,
-        timeout_seconds: float = 45.0,
     ) -> TurnResult:
-        """Wait for turn or incoming messages for a participant and return unread messages."""
+        """Wait indefinitely for turn or incoming messages for a participant and return unread messages."""
         canonical = normalize_handle(agent_id)
         self._load_state()
         if canonical not in self.participants:
             raise ValueError(f"Participant {canonical} not registered in room")
 
         evt = self._get_event(canonical)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(0.0, timeout_seconds)
 
         while True:
             self._load_state()
@@ -672,15 +704,9 @@ class RoomManager:
             if self.active_turn == canonical or len(unread) > 0:
                 break
 
-            now = loop.time()
-            remaining = deadline - now
-            if remaining <= 0:
-                break
-
-            poll_interval = min(0.3, remaining)
             evt.clear()
             try:
-                await asyncio.wait_for(evt.wait(), timeout=poll_interval)
+                await asyncio.wait_for(evt.wait(), timeout=0.3)
             except asyncio.TimeoutError:
                 pass
 
@@ -700,10 +726,8 @@ class RoomManager:
 
         if self.active_turn == canonical:
             status = "your_turn"
-        elif unread:
-            status = "message_received"
         else:
-            status = "timeout"
+            status = "message_received"
 
         # Update last_read_seq_id strictly in wait_for_turn and save
         participant.last_read_seq_id = self.seq_counter

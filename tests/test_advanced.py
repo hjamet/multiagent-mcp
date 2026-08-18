@@ -23,7 +23,7 @@ async def test_three_agent_turn_sequence(tmp_path: Path):
     assert rm.turn_queue == ["@Charlie"]
 
     # 2. Bob receives turn and responds to Alice
-    bob_turn = await rm.wait_for_turn("@Bob", timeout_seconds=1.0)
+    bob_turn = await rm.wait_for_turn("@Bob")
     assert bob_turn.status == "your_turn"
     # Bob receives Charlie's arrival notice (seq 2) and Alice's message (seq 3)
     assert len(bob_turn.new_messages) == 2
@@ -36,7 +36,7 @@ async def test_three_agent_turn_sequence(tmp_path: Path):
     assert rm.turn_queue == ["@Alice"]
 
     # 3. Charlie receives turn and responds to Bob
-    charlie_turn = await rm.wait_for_turn("@Charlie", timeout_seconds=1.0)
+    charlie_turn = await rm.wait_for_turn("@Charlie")
     assert charlie_turn.status == "your_turn"
     # Charlie was new at seq 2, so he receives Alice's message (seq 3) + Bob's message (seq 4)
     assert len(charlie_turn.new_messages) == 2
@@ -49,7 +49,7 @@ async def test_three_agent_turn_sequence(tmp_path: Path):
     assert rm.turn_queue == ["@Bob"]
 
     # 4. Alice receives turn and her unread messages
-    alice_turn = await rm.wait_for_turn("@Alice", timeout_seconds=1.0)
+    alice_turn = await rm.wait_for_turn("@Alice")
     assert alice_turn.status == "your_turn"
     # Alice receives Bob's arrival (seq 1), Charlie's arrival (seq 2), Bob's reply (seq 4) + Charlie's reply (seq 5)
     assert len(alice_turn.new_messages) == 4
@@ -123,12 +123,12 @@ async def test_mixed_private_public_with_unjoined_agents(tmp_path: Path):
     # Charlie joins
     await rm.join_room("@Charlie")
     # Charlie should not see the private message between Alice and Bob
-    charlie_res = await rm.wait_for_turn("@Charlie", timeout_seconds=0.1)
-    assert len(charlie_res.new_messages) == 0
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(rm.wait_for_turn("@Charlie"), timeout=0.05)
 
     # Bob sends public message to all
     await rm.post_message(sender="@Bob", content="Bienvenue à tous @all !")
-    charlie_turn = await rm.wait_for_turn("@Charlie", timeout_seconds=1.0)
+    charlie_turn = await rm.wait_for_turn("@Charlie")
     assert len(charlie_turn.new_messages) == 1
     assert "Bienvenue à tous @all !" in charlie_turn.new_messages[0].content
 
@@ -164,15 +164,16 @@ async def test_concurrent_multi_process_conversation_simulation(tmp_path: Path):
     await p3.join_room("@Charlie")
 
     # Catch up arrivals
-    await p1.wait_for_turn("@Alice", timeout_seconds=0.0)
-    await p2.wait_for_turn("@Bob", timeout_seconds=0.0)
-    await p3.wait_for_turn("@Charlie", timeout_seconds=0.0)
+    await p1.wait_for_turn("@Alice")
+    await p2.wait_for_turn("@Bob")
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(p3.wait_for_turn("@Charlie"), timeout=0.05)
 
     # 1. Alice sends to Bob
     await p1.post_message(sender="@Alice", content="Salut @Bob !")
 
     # 2. Bob receives Alice's message, responds to Charlie
-    bob_res = await p2.wait_for_turn("@Bob", timeout_seconds=1.0)
+    bob_res = await p2.wait_for_turn("@Bob")
     assert bob_res.status == "your_turn"
     assert len(bob_res.new_messages) == 1
     assert bob_res.new_messages[0].content == "Salut @Bob !"
@@ -180,7 +181,7 @@ async def test_concurrent_multi_process_conversation_simulation(tmp_path: Path):
     await p2.post_message(sender="@Bob", content="Salut @Charlie, Alice a parlé.")
 
     # 3. Charlie receives Bob's message (and Alice's earlier public message), responds to Alice
-    charlie_res = await p3.wait_for_turn("@Charlie", timeout_seconds=1.0)
+    charlie_res = await p3.wait_for_turn("@Charlie")
     assert charlie_res.status == "your_turn"
     assert len(charlie_res.new_messages) == 2
     assert charlie_res.new_messages[0].content == "Salut @Bob !"
@@ -188,9 +189,8 @@ async def test_concurrent_multi_process_conversation_simulation(tmp_path: Path):
 
     await p3.post_message(sender="@Charlie", content="Bien reçu @Alice !")
 
-
     # 4. Alice receives Charlie's message
-    alice_res = await p1.wait_for_turn("@Alice", timeout_seconds=1.0)
+    alice_res = await p1.wait_for_turn("@Alice")
     assert alice_res.status == "your_turn"
     # Alice receives Bob's message and Charlie's message
     assert len(alice_res.new_messages) == 2
