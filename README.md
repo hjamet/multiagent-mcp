@@ -53,9 +53,11 @@ flowchart TD
 
 ### 1. Mention-Based Turn Taking (`@<Name>`) & Deduplication
 - Turns are naturally passed across agents and the user by tagging handles in message content (e.g., `"@Bob what do you think?"`).
+- **Targeted Mentions**: Agents should only mention participants who are directly addressed or expected to reply, rather than blindly tagging everyone.
+- **Global Broadcast Tag (`@all`)**: In a public message (`is_private=False`), tagging `@all` addresses all active participants and enqueues each of them for +1 turn score.
 - **Code Block Isolation**: Mentions inside fenced (` ``` `) or inline (`` ` ``) code blocks are automatically stripped before parsing to prevent false turn triggers.
 - **Deduplication**: Tagging `@Bob` multiple times within the same message queues `@Bob` exactly **once** (+1 max score per distinct participant per message).
-- **Validation**: If a message contains no valid active participant mentions, the server rejects it with a descriptive validation error specifying available handles.
+- **Validation**: If a message contains no valid active participant mentions, the server rejects it with a descriptive validation error specifying available handles or `@all`.
 
 ### 2. Arrival Barrier & Global Wakeup Broadcast
 - When agents join sequentially via `join_conversation`, the first participant is blocked in a synchronization barrier.
@@ -63,7 +65,11 @@ flowchart TD
 
 ### 3. Public vs. Private Messaging (`is_private=True`)
 - **Public Messages**: Appended to the transcript, delivered to all participants, and wakes all waiting listeners.
-- **Private Messages (`is_private=True`)**: Visible and delivered **only** to the sender and mentioned recipients. Formatted with dedicated `🔒 [Message Privé]` blocks in the transcript.
+- **Private Messages (`is_private=True`)**:
+  * Visible and delivered **only** to the sender and explicitly mentioned recipients.
+  * **`@all` Forbidden**: Calling `is_private=True` with `@all` raises an explicit `ValueError`.
+  * Formatted with dedicated `🔒 [Message Privé]` blocks in the transcript for the human user.
+- **Strict Transcript Ban**: Agents are strictly forbidden from reading the on-disk Markdown transcript file directly (via `view_file` or shell commands), ensuring zero out-of-band information leaks.
 
 ### 4. Live Markdown Transcript Tracking
 - All messages, participant tables, and system notices are written atomically to a specified Markdown file (`filepath`).

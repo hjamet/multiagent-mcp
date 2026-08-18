@@ -190,17 +190,33 @@ class RoomManager:
 
         # Extract mentions outside code blocks
         raw_mentions = self._extract_mentions(content)
+        raw_mentions_lower = [rm.lower() for rm in raw_mentions]
+
+        has_all = "@all" in raw_mentions_lower or "all" in raw_mentions_lower
+
+        if is_private and has_all:
+            raise ValueError(
+                "Impossible de mentionner @all dans un message privé. "
+                "Seules les personnes explicitement mentionnées verront ce message "
+                "(et toutes les personnes mentionnées le verront)."
+            )
 
         # Map lowercase to canonical handle for active participants
         handle_map = {h.lower(): h for h in self.participants.keys()}
 
         valid_recipients: list[str] = []
-        for rm in raw_mentions:
-            rm_lower = rm.lower()
-            if rm_lower in handle_map:
-                target_handle = handle_map[rm_lower]
-                if target_handle != canonical_sender and target_handle not in valid_recipients:
-                    valid_recipients.append(target_handle)
+        if has_all and not is_private:
+            # @all in public message addresses all other participants
+            for h in self.participants.keys():
+                if h != canonical_sender and h not in valid_recipients:
+                    valid_recipients.append(h)
+        else:
+            for rm in raw_mentions:
+                rm_lower = rm.lower()
+                if rm_lower in handle_map:
+                    target_handle = handle_map[rm_lower]
+                    if target_handle != canonical_sender and target_handle not in valid_recipients:
+                        valid_recipients.append(target_handle)
 
         # Rejection if 0 valid mentions
         if not valid_recipients:
@@ -210,7 +226,7 @@ class RoomManager:
             if not available_handles:
                 available_handles = sorted(list(self.participants.keys()))
             error_str = (
-                f"Écrivez à au moins l'une des personnes suivantes : {', '.join(available_handles)}"
+                f"Écrivez à au moins l'une des personnes suivantes : {', '.join(available_handles)}, ou @all"
             )
             raise ValueError(error_str)
 
@@ -320,11 +336,16 @@ class RoomManager:
         else:
             status = "timeout"
 
+        notice = (
+            f"Transcript: '{self.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
+            if self.filepath
+            else None
+        )
         return TurnResult(
             status=status,
             active_turn=self.active_turn,
             new_messages=unread,
             current_queue=list(self.turn_queue),
             active_participants=list(self.participants.keys()),
-            system_notice=None,
+            system_notice=notice,
         )

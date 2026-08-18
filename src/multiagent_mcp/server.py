@@ -135,13 +135,22 @@ async def send_message(
 ) -> TurnResult:
     """Post a message to the conversation room with mandatory @mentions.
 
-    Puts the sender into a waiting loop until it is their next turn or until
-    a new message arrives, returning ONLY new unread messages when unblocked.
+    RULES & BEHAVIOR:
+    - Mentions: You MUST include at least one @mention. Only mention participants who are
+      directly addressed or expected to reply. Do NOT tag everyone blindly.
+    - Global Tag: You can use '@all' in a public message (is_private=False) to address everyone
+      and give each participant +1 turn score in the queue.
+    - Private Messages (is_private=True):
+      * You CANNOT mention '@all' in a private message (raises ValueError).
+      * ONLY the participants explicitly mentioned in the message will see it (and ALL mentioned
+        participants will see it).
+    - Transcript Ban: The live transcript is recorded on disk. It is strictly forbidden to consult
+      the transcript file directly (via view_file or shell) unless explicitly instructed by the user.
 
     Args:
         sender: Your participant handle (e.g. '@Alice').
-        content: Message content. MUST contain at least one valid @recipient mention.
-        is_private: If True, message is only visible to sender and mentioned recipients.
+        content: Message content with @mentions (e.g. '@Bob', '@all').
+        is_private: If True, message is only visible to sender and explicitly mentioned recipients.
         timeout_seconds: Max seconds to wait before yielding turn status.
 
     Returns:

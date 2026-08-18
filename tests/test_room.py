@@ -228,3 +228,24 @@ async def test_wait_for_turn_unread_tracking(tmp_path: Path):
     res_empty = await rm.wait_for_turn("@Bob", timeout_seconds=0.2)
     assert res_empty.status == "timeout"
     assert len(res_empty.new_messages) == 0
+
+
+@pytest.mark.asyncio
+async def test_all_mention_public_and_private_rejection(tmp_path: Path):
+    room_file = tmp_path / "transcript.md"
+    rm = RoomManager()
+    rm.init_room(filepath=str(room_file))
+    await rm.join_room("@Alice")
+    await rm.join_room("@Bob")
+    await rm.join_room("@Charlie")
+
+    # 1. Public message with @all
+    msg = await rm.post_message(sender="@Alice", content="Hello everyone @all!", is_private=False)
+    assert "@Bob" in msg.recipients
+    assert "@Charlie" in msg.recipients
+    assert "@Alice" not in msg.recipients
+
+    # 2. Private message with @all should raise ValueError
+    with pytest.raises(ValueError) as exc:
+        await rm.post_message(sender="@Alice", content="Secret to @all", is_private=True)
+    assert "Impossible de mentionner @all dans un message privé" in str(exc.value)
