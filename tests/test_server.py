@@ -136,7 +136,7 @@ async def test_send_message_blocking_turn_taking(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_send_message_private_explicit_recipients():
-    """Test send_message tool with explicit private recipients list."""
+    """Test send_message tool with explicit private recipients list and callout rendering."""
     await room.join_room("@Alice")
     await room.join_room("@Bob")
     await room.join_room("@Charlie")
@@ -167,6 +167,12 @@ async def test_send_message_private_explicit_recipients():
     assert len(charlie_res.new_messages) == 0
 
     await alice_task
+
+    # Validate file transcript has WARNING callouts for private message
+    assert room.filepath is not None
+    file_content = room.filepath.read_text(encoding="utf-8")
+    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content
+    assert "> 🔒 **Dernier message (Privé) :** **@Alice** ➔ @Bob" in file_content
 
 
 @pytest.mark.asyncio

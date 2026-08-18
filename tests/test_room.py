@@ -228,10 +228,11 @@ async def test_explicit_private_recipients_list_no_leak(tmp_path: Path):
     antoine_res = await rm.wait_for_turn("@Antoine", timeout_seconds=0.1)
     assert len(antoine_res.new_messages) == 0
 
-    # Verify transcript header
+    # Verify transcript header & warning callouts
     file_content = room_file.read_text(encoding="utf-8")
-    assert "### 🔒 [Message Privé] @Claire ➔ @MJ" in file_content
-    assert "➔ @Antoine" not in file_content.split("### 🔒 [Message Privé]")[1].split("\n\n")[0]
+    assert "> [!WARNING] 🔒 Message Privé : @Claire ➔ @MJ" in file_content
+    assert "➔ @Antoine" not in file_content.split("> [!WARNING] 🔒 Message Privé :")[1].split("\n\n")[0]
+    assert "> 🔒 **Dernier message (Privé) :** **@Claire** ➔ @MJ" in file_content
 
 
 @pytest.mark.asyncio
@@ -261,10 +262,47 @@ async def test_private_message_visibility_and_formatting(tmp_path: Path):
     charlie_res = await rm.wait_for_turn("@Charlie", timeout_seconds=0.1)
     assert len(charlie_res.new_messages) == 0
 
-    # Transcript file has private tag
+    # Transcript file has private warning callout and header
     file_content = room_file.read_text(encoding="utf-8")
-    assert "### 🔒 [Message Privé] @Alice ➔ @Bob" in file_content
-    assert "Secret message for @Bob" in file_content
+    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content
+    assert "> Secret message for @Bob" in file_content
+    assert "> 🔒 **Dernier message (Privé) :** **@Alice** ➔ @Bob" in file_content
+
+
+@pytest.mark.asyncio
+async def test_callout_colors_private_vs_public(tmp_path: Path):
+    """Test that public messages render [!NOTE] and private messages render [!WARNING]."""
+    room_file = tmp_path / "callout_test.md"
+    rm = RoomManager()
+    rm.init_room(filepath=str(room_file), participants=["@Alice", "@Bob"])
+    await rm.join_room("@Alice")
+    await rm.join_room("@Bob")
+
+    # 1. Post a public message
+    await rm.post_message(sender="@Alice", content="Message public pour @Bob\nDeuxième ligne")
+    content_pub = room_file.read_text(encoding="utf-8")
+
+    # Header must have [!NOTE] for public message
+    assert "> [!NOTE]" in content_pub
+    assert "> 💬 **Dernier message :** **@Alice** à " in content_pub
+    # Transcript must have standard markdown heading
+    assert "### @Alice ➔ @Bob" in content_pub
+    assert "Message public pour @Bob\nDeuxième ligne\n\n---" in content_pub
+
+    # 2. Post a private message
+    await rm.post_message(
+        sender="@Bob",
+        content="Ligne 1 privée\nLigne 2 secrète",
+        private=["@Alice"],
+    )
+    content_priv = room_file.read_text(encoding="utf-8")
+
+    # Header must now have [!WARNING] for private message
+    assert "> [!WARNING]" in content_priv
+    assert "> 🔒 **Dernier message (Privé) :** **@Bob** ➔ @Alice à " in content_priv
+    # Transcript must contain the warning callout with indented content
+    assert "> [!WARNING] 🔒 Message Privé : @Bob ➔ @Alice" in content_priv
+    assert "> \n> Ligne 1 privée\n> Ligne 2 secrète\n\n---" in content_priv
 
 
 @pytest.mark.asyncio

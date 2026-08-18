@@ -68,13 +68,22 @@ class RoomManager:
         quoted = "\n> ".join(first_lines)
         if len(lines) > 4:
             quoted += "\n> *(...)*"
-        lock = "🔒 [Privé] " if msg.is_private else ""
-        return (
-            f"> [!NOTE]\n"
-            f"> 💬 **Dernier message :** {lock}**{msg.sender}** à {time_str}\n"
-            f"> \n"
-            f"> {quoted}\n"
-        )
+
+        if msg.is_private:
+            recipients_str = ", ".join(msg.recipients)
+            return (
+                f"> [!WARNING]\n"
+                f"> 🔒 **Dernier message (Privé) :** **{msg.sender}** ➔ {recipients_str} à {time_str}\n"
+                f"> \n"
+                f"> {quoted}\n"
+            )
+        else:
+            return (
+                f"> [!NOTE]\n"
+                f"> 💬 **Dernier message :** **{msg.sender}** à {time_str}\n"
+                f"> \n"
+                f"> {quoted}\n"
+            )
 
     def _format_participants_table(self) -> str:
         """Format the unified live participant & priority queue table sorted by urgency."""
@@ -362,9 +371,12 @@ class RoomManager:
         time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
         recipients_str = ", ".join(valid_recipients)
         if msg_is_private:
+            clean_content = content.replace("\r\n", "\n")
+            content_indented = "\n> ".join(clean_content.split("\n"))
             entry = (
-                f"### 🔒 [Message Privé] {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
-                f"{content}\n\n"
+                f"> [!WARNING] 🔒 Message Privé : {canonical_sender} ➔ {recipients_str} ({time_str})\n"
+                f"> \n"
+                f"> {content_indented}\n\n"
                 f"---"
             )
         else:
