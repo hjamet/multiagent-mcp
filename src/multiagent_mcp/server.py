@@ -30,6 +30,8 @@ def init_conversation(
     filepath: str,
     participants: list[str],
     topic: str = "",
+    first_speaker: Optional[str] = None,
+    force: bool = False,
 ) -> dict:
     """Initialize a multi-agent conversation room with a markdown transcript file.
 
@@ -39,16 +41,25 @@ def init_conversation(
         filepath: Path to the markdown file where transcripts are recorded.
         participants: List of participant handles (e.g. ['@Alice', '@Bob', '@User']).
         topic: Initial topic or context of the conversation.
+        first_speaker: Initial first speaker handle (e.g. '@Alice'). Defaults to first participant.
+        force: Force overwrite existing conversation files.
 
     Returns:
         Dictionary with initialization status and room summary.
     """
-    room.init_room(filepath=filepath, participants=participants, topic=topic)
+    room.init_room(
+        filepath=filepath,
+        participants=participants,
+        topic=topic,
+        first_speaker=first_speaker,
+        force=force,
+    )
     return {
         "status": "initialized",
         "filepath": filepath,
         "topic": topic,
         "participants": [normalize_handle(p) for p in (participants or [])],
+        "first_speaker": room.first_speaker,
         "message": f"Room initialized with {len(participants or [])} participants.",
     }
 
@@ -60,10 +71,9 @@ async def join_conversation(
 ) -> TurnResult:
     """Join the multi-agent conversation room.
 
-    If you are the first active participant in the room, blocks/waits until another
-    participant joins or mentions you.
-    If you are a subsequent participant, broadcasts your arrival, unblocks
-    waiting agents, and returns the current turn state.
+    Blocks until ALL declared participants have joined the room (all_joined barrier).
+    Once all participants have joined, returns status="your_turn" for first_speaker,
+    or status="joined" for other participants.
 
     Args:
         handle: Your participant handle (e.g. '@Alice' or 'Alice').
@@ -73,48 +83,52 @@ async def join_conversation(
         TurnResult containing turn status, active turn, queue, and unread messages.
     """
     canonical = normalize_handle(handle)
-    active_before = [
-        h for h, p in room.participants.items() if p.status == "active" and h != canonical
-    ]
-    is_first = len(active_before) == 0
-
     await room.join_room(handle=canonical, name=name)
+    room._load_state()
 
-    active_count = sum(1 for p in room.participants.values() if p.status == "active")
+    all_joined = len(room.participants) > 0 and all(p.status == "active" for p in room.participants.values())
 
-    if is_first and active_count <= 1:
-        # First active participant: immediately blocks/waits until another joins or is mentioned
-        return await room.wait_for_turn(canonical)
-    else:
-        # Subsequent or rejoining participant: fetch pending unread messages or return current state
-        room._load_state()
-        participant = room.participants[canonical]
-        unread = [
-            m
-            for m in room.messages
-            if m.seq_id > participant.last_read_seq_id
-            and m.sender != canonical
-            and (not m.is_private or canonical in m.recipients)
-        ]
-        if room.active_turn == canonical or len(unread) > 0:
-            return await room.wait_for_turn(canonical)
-        else:
-            participant.last_read_seq_id = room.seq_counter
-            room._save_state()
-            active_list = [p.handle for p in room.participants.values() if p.status == "active"]
-            notice = (
-                f"Transcript: '{room.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
-                if room.filepath
-                else None
-            )
-            return TurnResult(
-                status="joined",
-                active_turn=room.active_turn,
-                new_messages=[],
-                current_queue=list(room.turn_queue),
-                active_participants=active_list,
-                system_notice=notice or f"Joined room. Active participants: {active_count}",
-            )
+    if not all_joined:
+        evt = room._get_event(canonical)
+        while True:
+            room._load_state()
+            all_joined = len(room.participants) > 0 and all(p.status == "active" for p in room.participants.values())
+            if all_joined:
+                break
+            evt.clear()
+            try:
+                await asyncio.wait_for(evt.wait(), timeout=0.3)
+            except asyncio.TimeoutError:
+                pass
+
+    # All joined!
+    room._load_state()
+    participant = room.participants[canonical]
+    unread = [
+        m
+        for m in room.messages
+        if m.seq_id > participant.last_read_seq_id
+        and m.sender != canonical
+        and (not m.is_private or canonical in m.recipients)
+    ]
+    participant.last_read_seq_id = room.seq_counter
+    room._save_state()
+
+    status = "your_turn" if room.active_turn == canonical else "joined"
+    active_list = [p.handle for p in room.participants.values() if p.status == "active"]
+    notice = (
+        f"Transcript: '{room.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
+        if room.filepath
+        else None
+    )
+    return TurnResult(
+        status=status,
+        active_turn=room.active_turn,
+        new_messages=unread,
+        current_queue=list(room.turn_queue),
+        active_participants=active_list,
+        system_notice=notice or f"Joined room. Active participants: {len(active_list)}",
+    )
 
 
 @mcp.tool()

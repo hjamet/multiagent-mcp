@@ -117,13 +117,23 @@ def spawn_daemon() -> None:
         )
 
 
-def ensure_daemon(max_wait_seconds: float = 5.0, host: str = DEFAULT_HOST) -> int:
+def ensure_daemon(max_wait_seconds: float = 5.0, host: str = DEFAULT_HOST, force_respawn: bool = False) -> int:
     """Ensure the daemon is running and return its port number."""
-    port = get_daemon_port()
-    if port and is_port_reachable(port, host=host):
-        return port
+    if not force_respawn:
+        port = get_daemon_port()
+        if port and is_port_reachable(port, host=host):
+            return port
+    else:
+        # Cleanup stale discovery files if force_respawn
+        config_dir = get_config_dir()
+        for f in (config_dir / "daemon.json", config_dir / "daemon.port"):
+            try:
+                if f.exists():
+                    f.unlink(missing_ok=True)
+            except Exception:
+                pass
 
-    # Spawn daemon if not running or unreachable
+    # Spawn daemon if not running or unreachable or force_respawn
     spawn_daemon()
 
     start = time.time()
@@ -155,20 +165,14 @@ def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
     return bytes(buf)
 
 
-def send_request(
+def _raw_send_request(
     action: str,
-    payload: Optional[dict[str, Any]] = None,
-    port: Optional[int] = None,
+    payload: dict[str, Any],
+    port: int,
     host: str = DEFAULT_HOST,
     timeout: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Send a framed JSON IPC request to the daemon and return the JSON response."""
-    if port is None:
-        port = ensure_daemon(host=host)
-
-    if payload is None:
-        payload = {}
-
+    """Execute raw framed socket request."""
     req = {"action": action, "payload": payload, **payload}
     req_bytes = json.dumps(req, ensure_ascii=False).encode("utf-8")
     header = struct.pack(">I", len(req_bytes))
@@ -191,6 +195,29 @@ def send_request(
             if "result" in resp_data:
                 return resp_data["result"]
         return resp_data
+
+
+def send_request(
+    action: str,
+    payload: Optional[dict[str, Any]] = None,
+    port: Optional[int] = None,
+    host: str = DEFAULT_HOST,
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
+    """Send a framed JSON IPC request to the daemon with auto-recovery on connection loss."""
+    if payload is None:
+        payload = {}
+
+    active_port = port if port is not None else ensure_daemon(host=host)
+
+    try:
+        return _raw_send_request(action, payload, port=active_port, host=host, timeout=timeout)
+    except (ConnectionResetError, ConnectionRefusedError, ConnectionError, OSError, struct.error):
+        if port is not None:
+            raise
+        # Auto-recovery: invalid port / socket reset, force respawn daemon and retry once
+        active_port = ensure_daemon(host=host, force_respawn=True)
+        return _raw_send_request(action, payload, port=active_port, host=host, timeout=timeout)
 
 
 def normalize_handle(handle: str) -> str:
@@ -235,6 +262,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help="Initial conversation topic",
+    )
+    init_parser.add_argument(
+        "--first-speaker",
+        "-s",
+        type=str,
+        default=None,
+        help="Initial first speaker handle (e.g. @MJ)",
+    )
+    init_parser.add_argument(
+        "--force",
+        "-F",
+        action="store_true",
+        default=False,
+        help="Force overwrite existing conversation session files",
     )
 
     # Command: join
@@ -346,6 +387,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "file": args.file,
             "participants": [normalize_handle(p) for p in args.participants],
             "topic": args.topic,
+            "first_speaker": normalize_handle(args.first_speaker) if args.first_speaker else None,
+            "force": bool(args.force),
         }
         res = send_request("init", payload)
         print(json.dumps(res, indent=2, ensure_ascii=False))

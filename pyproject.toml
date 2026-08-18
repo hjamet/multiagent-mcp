@@ -20,15 +20,6 @@ dependencies = [
 multiagent-mcp = "multiagent_mcp.cli:main"
 multiagent = "multiagent_mcp.cli:main"
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/multiagent_mcp"]
 
-[tool.pytest.ini_options]
-pythonpath = ["src"]
-asyncio_mode = "auto"

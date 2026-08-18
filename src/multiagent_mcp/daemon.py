@@ -190,29 +190,65 @@ class DaemonServer:
         filepath: str,
         participants: Optional[list[str]] = None,
         topic: str = "",
+        first_speaker: Optional[str] = None,
+        force: bool = False,
     ) -> dict:
         """Initialize room state and transcript file."""
-        self.room.init_room(filepath=filepath, participants=participants, topic=topic)
+        self.room.init_room(
+            filepath=filepath,
+            participants=participants,
+            topic=topic,
+            first_speaker=first_speaker,
+            force=force,
+        )
         self._wake_all()
         return {
             "status": "initialized",
             "filepath": str(self.room.filepath) if self.room.filepath else filepath,
             "topic": self.room.topic,
             "participants": [p.handle for p in self.room.participants.values()],
+            "first_speaker": self.room.first_speaker,
             "message": f"Room initialized with {len(self.room.participants)} participants.",
         }
 
     async def handle_join(self, handle: str, name: str = "") -> dict:
-        """Register participant, broadcast arrival notice if >=2 active, wake waiting clients."""
+        """Register participant, wait for all_joined barrier, and return turn status."""
         canonical = normalize_handle(handle)
-        unread = self._get_unread_messages(canonical)
         participant = await self.room.join_room(handle=canonical, name=name)
+        self.room._load_state()
+
+        all_joined = (
+            len(self.room.participants) > 0
+            and all(p.status == "active" for p in self.room.participants.values())
+        )
+
+        if not all_joined:
+            # Wait until all declared participants join
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            self.waiting_clients.setdefault(canonical, []).append(fut)
+            try:
+                await fut
+            finally:
+                if canonical in self.waiting_clients:
+                    if fut in self.waiting_clients[canonical]:
+                        self.waiting_clients[canonical].remove(fut)
+                    if not self.waiting_clients[canonical]:
+                        del self.waiting_clients[canonical]
+        else:
+            if self.room.active_turn is None and self.room.first_speaker:
+                self.room.active_turn = self.room.first_speaker
+                self.room._save_state()
+            self._wake_all()
+
+        # Reload state after waking or barrier lifting
+        self.room._load_state()
+        participant = self.room.participants.get(canonical, participant)
+        unread = self._get_unread_messages(canonical)
         participant.last_read_seq_id = self.room.seq_counter
         self.room._save_state()
 
-        # Wake waiting clients (arrival notice unblocks peers)
-        self._wake_all()
-
+        status = "your_turn" if self.room.active_turn == canonical else "joined"
         active_count = sum(1 for p in self.room.participants.values() if p.status == "active")
         active_list = [p.handle for p in self.room.participants.values() if p.status == "active"]
         notice = (
@@ -221,7 +257,7 @@ class DaemonServer:
             else None
         )
         return {
-            "status": "joined",
+            "status": status,
             "participant": participant.model_dump(mode="json"),
             "active_turn": self.room.active_turn,
             "new_messages": [m.model_dump(mode="json") for m in unread],
@@ -316,6 +352,8 @@ class DaemonServer:
                     filepath=req.get("filepath") or req.get("file") or "",
                     participants=req.get("participants"),
                     topic=req.get("topic", ""),
+                    first_speaker=req.get("first_speaker") or req.get("firstSpeaker"),
+                    force=bool(req.get("force", False)),
                 )
             elif action in ("join", "join_room", "join_conversation"):
                 res = await self.handle_join(
@@ -484,9 +522,23 @@ class DaemonClient:
             except Exception:
                 pass
 
-    async def init(self, filepath: str, participants: list[str], topic: str = "") -> dict:
+    async def init(
+        self,
+        filepath: str,
+        participants: list[str],
+        topic: str = "",
+        first_speaker: Optional[str] = None,
+        force: bool = False,
+    ) -> dict:
         """Initialize room via daemon."""
-        return await self.request("init", filepath=filepath, participants=participants, topic=topic)
+        return await self.request(
+            "init",
+            filepath=filepath,
+            participants=participants,
+            topic=topic,
+            first_speaker=first_speaker,
+            force=force,
+        )
 
     async def join(self, handle: str, name: str = "") -> dict:
         """Join room via daemon."""
@@ -570,9 +622,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
+    cfg_dir = get_config_dir()
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    log_file = cfg_dir / "daemon.log"
+
+    handlers: list[logging.Handler] = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ]
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+        handlers=handlers,
     )
 
     print(f"Starting MultiAgentHub IPC Daemon on {args.host}:{args.port}...")

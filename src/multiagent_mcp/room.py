@@ -52,8 +52,10 @@ class RoomManager:
         self.last_posted_message: Optional[Message] = None
         self.last_message_by_participant: dict[str, Message] = {}
         self.active_turn: Optional[str] = None
+        self.first_speaker: Optional[str] = None
         self.seq_counter: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._io_lock: asyncio.Lock = asyncio.Lock()
 
         if self.filepath and not self._state_file:
             self._state_file = Path(f"{self.filepath}.state.json")
@@ -100,7 +102,6 @@ class RoomManager:
         except Exception:
             pass
 
-
     def _save_state(self) -> None:
         """Atomically persist current room state to JSON file."""
         state_file = self._get_state_file()
@@ -114,6 +115,7 @@ class RoomManager:
             state_data = {
                 "filepath": filepath_str,
                 "topic": self.topic,
+                "first_speaker": self.first_speaker,
                 "seq_counter": self.seq_counter,
                 "active_turn": self.active_turn,
                 "priority_scores": self.priority_scores,
@@ -132,20 +134,26 @@ class RoomManager:
                     else None
                 ),
             }
+            json_text = json.dumps(state_data, indent=2, ensure_ascii=False)
             tmp_file = state_file.with_name(f"{state_file.name}.tmp.{os.getpid()}_{time.time_ns()}")
-            tmp_file.write_text(
-                json.dumps(state_data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            os.replace(tmp_file, state_file)
-        except Exception:
-            try:
-                state_file.write_text(
-                    json.dumps(state_data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            except Exception as e:
-                print(f"[RoomManager] Error saving state to {state_file}: {e}", file=sys.stderr)
+            tmp_file.write_text(json_text, encoding="utf-8")
+
+            for attempt in range(10):
+                try:
+                    os.replace(tmp_file, state_file)
+                    break
+                except (PermissionError, OSError):
+                    if attempt == 9:
+                        try:
+                            state_file.write_text(json_text, encoding="utf-8")
+                            if tmp_file.exists():
+                                tmp_file.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(0.01)
+        except Exception as e:
+            print(f"[RoomManager] Error saving state to {state_file}: {e}", file=sys.stderr)
 
     def _load_state(self) -> bool:
         """Load and synchronize room state from JSON file if available."""
@@ -179,6 +187,7 @@ class RoomManager:
                 self.filepath = Path(sf_str[:-11])
 
         self.topic = data.get("topic", "")
+        self.first_speaker = data.get("first_speaker")
         self.seq_counter = data.get("seq_counter", 0)
         self.active_turn = data.get("active_turn")
         self.priority_scores = data.get("priority_scores", {})
@@ -345,43 +354,48 @@ class RoomManager:
         if not self.filepath:
             return
 
-        try:
-            callout = self._format_last_message_callout()
-            table = self._format_participants_table()
+        for attempt in range(10):
+            try:
+                callout = self._format_last_message_callout()
+                table = self._format_participants_table()
 
-            header = [
-                "# Multi-Agent Room",
-                "",
-                f"- **Fichier :** `{self.filepath.as_posix()}`",
-                f"- **Sujet :** {self.topic if self.topic else 'Discussion multi-agents'}",
-                f"- **Initialisé le :** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "",
-            ]
-            if callout:
-                header.append(callout)
-            header.extend([
-                table,
-                "",
-                "---",
-                "",
-                "## Fil de discussion",
-                "",
-            ])
-            header_text = "\n".join(header)
+                header = [
+                    "# Multi-Agent Room",
+                    "",
+                    f"- **Fichier :** `{self.filepath.as_posix()}`",
+                    f"- **Sujet :** {self.topic if self.topic else 'Discussion multi-agents'}",
+                    f"- **Initialisé le :** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "",
+                ]
+                if callout:
+                    header.append(callout)
+                header.extend([
+                    table,
+                    "",
+                    "---",
+                    "",
+                    "## Fil de discussion",
+                    "",
+                ])
+                header_text = "\n".join(header)
 
-            self.filepath.parent.mkdir(parents=True, exist_ok=True)
-            if self.filepath.exists():
-                current_text = self.filepath.read_text(encoding="utf-8")
-                marker = "## Fil de discussion\n"
-                if marker in current_text:
-                    _, body = current_text.split(marker, 1)
-                    body = body.lstrip("\n")
-                    if body:
-                        self.filepath.write_text(header_text + "\n" + body, encoding="utf-8")
-                        return
-            self.filepath.write_text(header_text, encoding="utf-8")
-        except Exception as e:
-            print(f"[RoomManager] Error updating file header ({self.filepath}): {e}", file=sys.stderr)
+                self.filepath.parent.mkdir(parents=True, exist_ok=True)
+                if self.filepath.exists():
+                    current_text = self.filepath.read_text(encoding="utf-8")
+                    marker = "## Fil de discussion\n"
+                    if marker in current_text:
+                        _, body = current_text.split(marker, 1)
+                        body = body.lstrip("\n")
+                        if body:
+                            self.filepath.write_text(header_text + "\n" + body, encoding="utf-8")
+                            return
+                self.filepath.write_text(header_text, encoding="utf-8")
+                break
+            except (PermissionError, OSError):
+                if attempt == 9:
+                    print(f"[RoomManager] Error updating file header ({self.filepath})", file=sys.stderr)
+                else:
+                    time.sleep(0.01)
 
     def _append_to_file(self, formatted_entry: str) -> None:
         """Append text to the markdown transcript file."""
@@ -393,25 +407,58 @@ class RoomManager:
         if not self.filepath:
             return
 
-        try:
-            self.filepath.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.filepath, "a", encoding="utf-8") as f:
-                f.write(formatted_entry + "\n\n")
-        except Exception as e:
-            print(f"[RoomManager] Error appending to transcript ({self.filepath}): {e}", file=sys.stderr)
+        for attempt in range(10):
+            try:
+                self.filepath.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.filepath, "a", encoding="utf-8") as f:
+                    f.write(formatted_entry + "\n\n")
+                break
+            except (PermissionError, OSError):
+                if attempt == 9:
+                    print(f"[RoomManager] Error appending to transcript ({self.filepath})", file=sys.stderr)
+                else:
+                    time.sleep(0.01)
 
     def init_room(
         self,
-        filepath: str,
+        filepath: Optional[str] = None,
         participants: Optional[list[str]] = None,
         topic: str = "",
+        first_speaker: Optional[str] = None,
+        force: bool = False,
     ) -> None:
         """Initialize or reset the room, clear memory, and create markdown and state files."""
-        self.filepath = Path(filepath) if filepath else None
-        if self.filepath:
-            self._state_file = Path(f"{self.filepath}.state.json")
-        else:
-            self._state_file = get_default_state_file()
+        target_path = Path(filepath) if filepath else None
+        target_state = Path(f"{target_path}.state.json") if target_path else get_default_state_file()
+
+        # Overwrite protection: check if existing file or state file has active messages
+        if not force:
+            has_existing_messages = False
+            if target_state.exists():
+                try:
+                    sdata = json.loads(target_state.read_text(encoding="utf-8"))
+                    if sdata.get("messages") and len(sdata["messages"]) > 0:
+                        has_existing_messages = True
+                except Exception:
+                    pass
+            if not has_existing_messages and target_path and target_path.exists():
+                try:
+                    t_content = target_path.read_text(encoding="utf-8")
+                    if "## Fil de discussion\n" in t_content:
+                        _, body = t_content.split("## Fil de discussion\n", 1)
+                        if body.strip():
+                            has_existing_messages = True
+                except Exception:
+                    pass
+
+            if has_existing_messages:
+                raise FileExistsError(
+                    f"Le fichier '{filepath}' existe déjà et contient une session avec des messages. "
+                    "Utilisez --force pour écraser."
+                )
+
+        self.filepath = target_path
+        self._state_file = target_state
         self._set_active_pointer()
 
         self.topic = topic
@@ -425,9 +472,16 @@ class RoomManager:
         self.active_turn = None
         self.seq_counter = 0
 
-        if participants:
-            for handle in participants:
-                canonical = normalize_handle(handle)
+        norm_participants = [normalize_handle(p) for p in participants] if participants else []
+        if first_speaker:
+            self.first_speaker = normalize_handle(first_speaker)
+        elif norm_participants:
+            self.first_speaker = norm_participants[0]
+        else:
+            self.first_speaker = None
+
+        if norm_participants:
+            for canonical in norm_participants:
                 self.participants[canonical] = Participant(
                     name=canonical.lstrip("@"),
                     handle=canonical,
@@ -456,7 +510,7 @@ class RoomManager:
         self._save_state()
 
     async def join_room(self, handle: str, name: Optional[str] = None) -> Participant:
-        """Register a participant in the room and broadcast arrival notice if >= 2 active participants."""
+        """Register a participant in the room, broadcast arrival notice, and lift all_joined barrier."""
         self._load_state()
         canonical = normalize_handle(handle)
         disp_name = name if name else canonical.lstrip("@")
@@ -484,6 +538,8 @@ class RoomManager:
             self._get_event(canonical)
             self.priority_scores[canonical] = 0
             self.mention_seq[canonical] = 0
+            if self.first_speaker is None:
+                self.first_speaker = canonical
 
         active_count = sum(1 for p in self.participants.values() if p.status == "active")
 
@@ -509,6 +565,29 @@ class RoomManager:
 
             # Wake up all currently waiting active participants with this arrival notice
             for h in other_active:
+                self._get_event(h).set()
+
+        all_joined = len(self.participants) > 0 and all(p.status == "active" for p in self.participants.values())
+        if all_joined and self.active_turn is None:
+            self.active_turn = self.first_speaker
+            barrier_notice = f"Tous les participants ont rejoint la conversation. La parole est à {self.first_speaker}."
+            self.seq_counter += 1
+            all_handles = list(self.participants.keys())
+            msg = Message(
+                seq_id=self.seq_counter,
+                sender="@System",
+                recipients=all_handles,
+                content=barrier_notice,
+                is_private=False,
+                timestamp=datetime.now(timezone.utc),
+            )
+            self.messages.append(msg)
+
+            # Append barrier notice to markdown file
+            self._append_to_file(f"> 🔔 **Système :** {barrier_notice}")
+
+            # Wake up all participants
+            for h in all_handles:
                 self._get_event(h).set()
 
         # Update file header and save state
@@ -769,6 +848,7 @@ class RoomManager:
                 p.handle for p in self.participants.values() if p.status == "active"
             ],
             "active_turn": self.active_turn,
+            "first_speaker": self.first_speaker,
             "turn_queue": list(self.turn_queue),
             "message_count": len(self.messages),
             "topic": self.topic,

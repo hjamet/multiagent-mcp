@@ -97,12 +97,6 @@ cd multiagent-mcp
 pip install -e .
 ```
 
-To install development dependencies (testing with `pytest`):
-
-```bash
-pip install -e ".[dev]"
-```
-
 ---
 
 ## 🚀 Running the Server
@@ -421,24 +415,7 @@ Approche validée, privilégiez la simplicité d'implémentation @Alice.
 
 ---
 
-## 🧪 Testing
-
-The test suite covers:
-- Participant normalization and handle cleanup (`@Alice`, `Alice` $\to$ `@Alice`).
-- Mention extraction and code block stripping (` ``` ` / `` ` ``).
-- Arrival barrier synchronization and wakeup broadcasting.
-- Private message access control.
-- Incremental unread message slicing.
-- FastMCP tool registration and CLI commands (`serve` / `stdio`).
-
-Run tests using `pytest`:
-
-```bash
-pytest
-```
-
----
-
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+
