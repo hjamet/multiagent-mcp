@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
                 pass
             return 0
 
-    # All other subcommands (init, join, send, wait, list, status, stop-daemon) routed to fast_cli
+    # All other subcommands (init, join, send, list, status, stop-daemon) routed to fast_cli
     return fast_cli.main(argv)
 
 

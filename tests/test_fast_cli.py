@@ -85,11 +85,6 @@ def test_fast_cli_parser():
     assert args_send.content == "Hello"
     assert args_send.private == ["@Bob"]
 
-    # wait
-    args_wait = parser.parse_args(["wait", "-H", "@Alice"])
-    assert args_wait.command == "wait"
-    assert args_wait.handle == "@Alice"
-
     # list
     args_list = parser.parse_args(["list"])
     assert args_list.command == "list"
@@ -227,21 +222,6 @@ def test_fast_cli_send_command_private(capsys):
             "send",
             {"sender": "@Alice", "content": "secret", "private": ["@Bob", "@Charlie"]},
         )
-
-
-def test_fast_cli_wait_command(capsys):
-    """Test wait command routing to send_request."""
-    with patch("multiagent_mcp.fast_cli.send_request") as mock_send:
-        mock_send.return_value = {"status": "your_turn", "active_turn": "@Alice", "new_messages": []}
-        code = fast_cli.main(["wait", "-H", "Alice"])
-        assert code == 0
-        mock_send.assert_called_once_with(
-            "wait",
-            {"handle": "@Alice"},
-        )
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["status"] == "your_turn"
 
 
 def test_fast_cli_list_command(capsys):

@@ -72,16 +72,35 @@ def is_port_reachable(port: int, host: str = DEFAULT_HOST, timeout: float = 0.1)
         return False
 
 
+def get_python_exe() -> str:
+    """Find a valid python executable for running background modules."""
+    exe = sys.executable
+    exe_path = pathlib.Path(exe)
+    if exe_path.stem.lower() not in ("python", "pythonw"):
+        candidate = exe_path.parent.parent / ("python.exe" if sys.platform == "win32" else "python")
+        if candidate.exists():
+            return str(candidate)
+        candidate2 = exe_path.parent / ("python.exe" if sys.platform == "win32" else "python")
+        if candidate2.exists():
+            return str(candidate2)
+        import shutil
+        which_py = shutil.which("python") or shutil.which("python3")
+        if which_py:
+            return which_py
+    return exe
+
+
 def spawn_daemon() -> None:
     """Start the daemon in a detached background process."""
     config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
+    python_bin = get_python_exe()
 
     if sys.platform == "win32":
         # 0x08000000 = CREATE_NO_WINDOW
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000
         subprocess.Popen(
-            [sys.executable, "-m", "multiagent_mcp.daemon"],
+            [python_bin, "-m", "multiagent_mcp.daemon"],
             creationflags=flags,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -90,7 +109,7 @@ def spawn_daemon() -> None:
         )
     else:
         subprocess.Popen(
-            [sys.executable, "-m", "multiagent_mcp.daemon"],
+            [python_bin, "-m", "multiagent_mcp.daemon"],
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -165,7 +184,13 @@ def send_request(
         resp_header = _recv_exact(sock, 4)
         (resp_len,) = struct.unpack(">I", resp_header)
         resp_bytes = _recv_exact(sock, resp_len)
-        return json.loads(resp_bytes.decode("utf-8"))
+        resp_data = json.loads(resp_bytes.decode("utf-8"))
+        if isinstance(resp_data, dict):
+            if resp_data.get("status") == "error":
+                return resp_data
+            if "result" in resp_data:
+                return resp_data["result"]
+        return resp_data
 
 
 def normalize_handle(handle: str) -> str:
@@ -256,19 +281,6 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         default=None,
         help="Private message recipients list (e.g. @Bob @Charlie) or flag",
-    )
-
-    # Command: wait
-    wait_parser = subparsers.add_parser(
-        "wait",
-        help="Wait for your turn or incoming messages",
-    )
-    wait_parser.add_argument(
-        "--handle",
-        "-H",
-        type=str,
-        required=True,
-        help="Participant handle (e.g. @Alice)",
     )
 
     # Command: list
@@ -366,14 +378,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             "private": private_val,
         }
         res = send_request("send", payload)
-        print(json.dumps(res, indent=2, ensure_ascii=False))
-        return 0
-
-    elif args.command == "wait":
-        payload = {
-            "handle": normalize_handle(args.handle),
-        }
-        res = send_request("wait", payload)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 

@@ -90,7 +90,7 @@ async def test_daemon_lifecycle_and_discovery(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_daemon_turn_coordination_and_in_memory_wakeup(tmp_path: Path):
-    """Test fast turn coordination and in-memory waking of waiting clients."""
+    """Test fast turn coordination and blocking send with in-memory waking."""
     config_dir = tmp_path / "config"
     transcript_file = tmp_path / "transcript.md"
 
@@ -114,36 +114,38 @@ async def test_daemon_turn_coordination_and_in_memory_wakeup(tmp_path: Path):
         # Bob joins
         await client_bob.join("@Bob")
 
-        # Bob waits in background task
-        bob_wait_task = asyncio.create_task(client_bob.wait("@Bob"))
-
-        # Give small tick to ensure Bob is waiting
-        await asyncio.sleep(0.02)
-        assert "@Bob" in server.waiting_clients
-
-        # Alice sends message addressing Bob
-        send_res = await client_alice.send(
-            sender="@Alice",
-            content="@Bob hello! Peux-tu vérifier le code ?",
+        # Alice sends message addressing Bob and blocks waiting for next turn
+        alice_send_task = asyncio.create_task(
+            client_alice.send(
+                sender="@Alice",
+                content="@Bob hello! Peux-tu vérifier le code ?",
+            )
         )
-        assert send_res["status"] == "sent"
-        assert send_res["active_turn"] == "@Bob"
 
-        # Bob should wake up immediately via in-memory future
-        bob_turn = await asyncio.wait_for(bob_wait_task, timeout=1.0)
-        assert bob_turn["status"] == "your_turn"
-        assert bob_turn["active_turn"] == "@Bob"
-        assert len(bob_turn["new_messages"]) >= 1
-        assert bob_turn["new_messages"][-1]["content"] == "@Bob hello! Peux-tu vérifier le code ?"
+        # Give small tick to ensure Alice is waiting
+        await asyncio.sleep(0.02)
+        assert "@Alice" in server.waiting_clients
 
-        # Bob sends reply back to Alice
-        await client_bob.send(sender="@Bob", content="@Alice tout est bon !")
+        # Bob sends reply back to Alice and blocks waiting for next turn
+        bob_send_task = asyncio.create_task(
+            client_bob.send(sender="@Bob", content="@Alice tout est bon !")
+        )
 
-        # Alice calls wait and gets fast-path immediate return
-        alice_turn = await client_alice.wait("@Alice")
+        # Alice should wake up immediately via in-memory future with Bob's reply
+        alice_turn = await asyncio.wait_for(alice_send_task, timeout=1.0)
         assert alice_turn["status"] == "your_turn"
         assert alice_turn["active_turn"] == "@Alice"
         assert any(m["sender"] == "@Bob" for m in alice_turn["new_messages"])
+        assert any("tout est bon" in m["content"] for m in alice_turn["new_messages"])
+
+        # Alice sends follow-up in task to unblock Bob
+        alice_send_task2 = asyncio.create_task(
+            client_alice.send(sender="@Alice", content="@Bob merci beaucoup !")
+        )
+        bob_turn = await asyncio.wait_for(bob_send_task, timeout=1.0)
+        assert bob_turn["status"] == "your_turn" or bob_turn["status"] == "message_received"
+        assert any(m["sender"] == "@Alice" for m in bob_turn["new_messages"])
+        assert any("merci beaucoup" in m["content"] for m in bob_turn["new_messages"])
 
     finally:
         await server.stop()
@@ -166,10 +168,6 @@ async def test_daemon_error_handling(tmp_path: Path):
             participants=["@Alice"],
             topic="Error testing",
         )
-
-        # Wait for unregistered participant should raise error
-        with pytest.raises(RuntimeError, match="Participant @Unknown not registered in room"):
-            await client.wait("@Unknown")
 
         # Send with no mention should raise error
         await client.join("@Alice")

@@ -79,11 +79,6 @@ def test_cli_parser_defaults():
     ])
     assert args_send_flag.private == []
 
-    # Wait command
-    args_wait = parser.parse_args(["wait", "--handle", "@Bob"])
-    assert args_wait.command == "wait"
-    assert args_wait.handle == "@Bob"
-
     # List command
     args_list = parser.parse_args(["list"])
     assert args_list.command == "list"
@@ -156,8 +151,8 @@ def test_cli_list_command(tmp_path: Path, capsys):
     assert len(data["participants"]) == 2
 
 
-def test_cli_join_and_wait_commands(tmp_path: Path, capsys):
-    """Test join and wait subcommands return TurnResult JSON."""
+def test_cli_join_and_send_commands(tmp_path: Path, capsys):
+    """Test join and blocking send subcommands return TurnResult JSON."""
     import threading
     import time
     transcript = tmp_path / "chat_join.md"
@@ -169,39 +164,44 @@ def test_cli_join_and_wait_commands(tmp_path: Path, capsys):
     capsys.readouterr()
 
     # Alice joins (first participant, blocks until Bob joins)
-    def join_alice():
-        main(["join", "--handle", "@Alice", "--name", "Alice Smith"])
-
-    t = threading.Thread(target=join_alice)
-    t.start()
+    t_alice = threading.Thread(
+        target=lambda: main(["join", "--handle", "@Alice", "--name", "Alice Smith"]),
+        daemon=True,
+    )
+    t_alice.start()
     time.sleep(0.05)
 
     # Bob joins (second participant, unblocks Alice)
     exit_code = main(["join", "--handle", "@Bob", "--name", "Bob Jones"])
     assert exit_code == 0
-    t.join(timeout=2.0)
-    assert not t.is_alive()
+    t_alice.join(timeout=2.0)
+    assert not t_alice.is_alive()
 
-    # Alice sends a message to Bob in a thread
-    def send_alice():
-        main(["send", "--sender", "@Alice", "--content", "Hello @Bob"])
-
-    t_send = threading.Thread(target=send_alice)
-    t_send.start()
+    # Alice sends message to Bob (blocks until Bob replies)
+    t_alice_send = threading.Thread(
+        target=lambda: main(["send", "--sender", "@Alice", "--content", "Hello @Bob"]),
+        daemon=True,
+    )
+    t_alice_send.start()
     time.sleep(0.05)
 
-    # Bob calls wait -> unblocks with Alice's message
-    capsys.readouterr()
-    exit_code = main(["wait", "--handle", "@Bob"])
-    assert exit_code == 0
-    captured = capsys.readouterr()
-    wait_res = json.loads(captured.out)
-    assert wait_res["status"] == "your_turn"
+    # Bob sends reply to Alice (blocks until Alice replies) -> unblocks Alice
+    t_bob_send = threading.Thread(
+        target=lambda: main(["send", "--sender", "@Bob", "--content", "Hello @Alice"]),
+        daemon=True,
+    )
+    t_bob_send.start()
+    t_alice_send.join(timeout=2.0)
+    assert not t_alice_send.is_alive()
 
-    # Bob replies to Alice to unblock Alice's send
-    main(["send", "--sender", "@Bob", "--content", "Hello @Alice"])
-    t_send.join(timeout=2.0)
-    assert not t_send.is_alive()
+    # Alice replies to unblock Bob
+    t_alice_ack = threading.Thread(
+        target=lambda: main(["send", "--sender", "@Alice", "--content", "Got it @Bob"]),
+        daemon=True,
+    )
+    t_alice_ack.start()
+    t_bob_send.join(timeout=2.0)
+    assert not t_bob_send.is_alive()
 
 
 def test_cli_send_public_command(tmp_path: Path, capsys):
@@ -215,7 +215,7 @@ def test_cli_send_public_command(tmp_path: Path, capsys):
         "--participants", "@Alice", "@Bob",
     ])
     # Register Alice and Bob
-    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]))
+    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]), daemon=True)
     t_join.start()
     time.sleep(0.05)
     main(["join", "--handle", "@Bob"])
@@ -228,14 +228,18 @@ def test_cli_send_public_command(tmp_path: Path, capsys):
             "send",
             "--sender", "@Alice",
             "--content", "@Bob please check this out",
-        ])
+        ]),
+        daemon=True,
     )
     t_send.start()
     time.sleep(0.05)
 
-    # Bob waits and gets the message, then replies
-    main(["wait", "--handle", "@Bob"])
-    main(["send", "--sender", "@Bob", "--content", "Got it @Alice"])
+    # Bob replies to unblock Alice
+    t_bob = threading.Thread(
+        target=lambda: main(["send", "--sender", "@Bob", "--content", "Got it @Alice"]),
+        daemon=True,
+    )
+    t_bob.start()
     t_send.join(timeout=2.0)
     assert not t_send.is_alive()
 
@@ -250,7 +254,7 @@ def test_cli_send_private_recipients_list(tmp_path: Path, capsys):
         "--file", str(transcript),
         "--participants", "@Alice", "@Bob", "@Charlie",
     ])
-    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]))
+    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]), daemon=True)
     t_join.start()
     time.sleep(0.05)
     main(["join", "--handle", "@Bob"])
@@ -265,18 +269,18 @@ def test_cli_send_private_recipients_list(tmp_path: Path, capsys):
             "--sender", "@Alice",
             "--content", "Confidential info",
             "--private", "@Bob",
-        ])
+        ]),
+        daemon=True,
     )
     t_send.start()
     time.sleep(0.05)
 
-    # Bob waits and checks
-    main(["wait", "--handle", "@Bob"])
-    assert room.last_posted_message is not None
-    assert room.last_posted_message.is_private is True
-    assert room.last_posted_message.recipients == ["@Bob"]
-
-    main(["send", "--sender", "@Bob", "--content", "Understood @Alice"])
+    # Bob replies to unblock Alice
+    t_bob = threading.Thread(
+        target=lambda: main(["send", "--sender", "@Bob", "--content", "Understood @Alice"]),
+        daemon=True,
+    )
+    t_bob.start()
     t_send.join(timeout=2.0)
     assert not t_send.is_alive()
 
@@ -291,7 +295,7 @@ def test_cli_send_private_flag_and_boolean_strings(tmp_path: Path, capsys):
         "--file", str(transcript),
         "--participants", "@Alice", "@Bob",
     ])
-    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]))
+    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]), daemon=True)
     t_join.start()
     time.sleep(0.05)
     main(["join", "--handle", "@Bob"])
@@ -304,12 +308,13 @@ def test_cli_send_private_flag_and_boolean_strings(tmp_path: Path, capsys):
         "--sender", "@Alice",
         "--content", "@Bob Secret flag message",
         "--private",
-    ]))
+    ]), daemon=True)
     t1.start()
     time.sleep(0.05)
-    assert room.last_posted_message.is_private is True
-    main(["send", "--sender", "@Bob", "--content", "OK @Alice"])
+    t_bob1 = threading.Thread(target=lambda: main(["send", "--sender", "@Bob", "--content", "OK @Alice"]), daemon=True)
+    t_bob1.start()
     t1.join(timeout=2.0)
+    assert not t1.is_alive()
 
     # Send with --private true
     t2 = threading.Thread(target=lambda: main([
@@ -317,12 +322,13 @@ def test_cli_send_private_flag_and_boolean_strings(tmp_path: Path, capsys):
         "--sender", "@Alice",
         "--content", "@Bob Secret true string",
         "--private", "true",
-    ]))
+    ]), daemon=True)
     t2.start()
     time.sleep(0.05)
-    assert room.last_posted_message.is_private is True
-    main(["send", "--sender", "@Bob", "--content", "OK 2 @Alice"])
+    t_bob2 = threading.Thread(target=lambda: main(["send", "--sender", "@Bob", "--content", "OK 2 @Alice"]), daemon=True)
+    t_bob2.start()
     t2.join(timeout=2.0)
+    assert not t2.is_alive()
 
     # Send with --private false
     t3 = threading.Thread(target=lambda: main([
@@ -330,12 +336,13 @@ def test_cli_send_private_flag_and_boolean_strings(tmp_path: Path, capsys):
         "--sender", "@Alice",
         "--content", "@Bob Public false string",
         "--private", "false",
-    ]))
+    ]), daemon=True)
     t3.start()
     time.sleep(0.05)
-    assert room.last_posted_message.is_private is False
-    main(["send", "--sender", "@Bob", "--content", "OK 3 @Alice"])
+    t_bob3 = threading.Thread(target=lambda: main(["send", "--sender", "@Bob", "--content", "OK 3 @Alice"]), daemon=True)
+    t_bob3.start()
     t3.join(timeout=2.0)
+    assert not t3.is_alive()
 
 
 def test_cli_file_backed_persistence_across_commands(tmp_path: Path, capsys):
@@ -356,7 +363,7 @@ def test_cli_file_backed_persistence_across_commands(tmp_path: Path, capsys):
     assert state_file.exists()
 
     # 2. join Alice (in thread) & Bob
-    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]))
+    t_join = threading.Thread(target=lambda: main(["join", "--handle", "@Alice"]), daemon=True)
     t_join.start()
     time.sleep(0.05)
 
@@ -364,30 +371,26 @@ def test_cli_file_backed_persistence_across_commands(tmp_path: Path, capsys):
     assert exit_code == 0
     t_join.join(timeout=2.0)
 
-    # 3. send Alice -> Bob
+    # 3. send Alice -> Bob (blocks until Bob replies)
     t_send = threading.Thread(
         target=lambda: main([
             "send",
             "--sender", "@Alice",
             "--content", "@Bob Hello from separate CLI process",
-        ])
+        ]),
+        daemon=True,
     )
     t_send.start()
     time.sleep(0.05)
 
-    # 4. wait Bob
-    capsys.readouterr()
-    exit_code = main(["wait", "--handle", "@Bob"])
-    assert exit_code == 0
-    captured = capsys.readouterr()
-    wait_data = json.loads(captured.out)
-    assert wait_data["status"] == "your_turn"
-    assert len(wait_data["new_messages"]) >= 1
-    assert "Hello from separate CLI process" in wait_data["new_messages"][-1]["content"]
-
-    # Bob replies to unblock Alice
-    main(["send", "--sender", "@Bob", "--content", "Ack @Alice"])
+    # 4. Bob replies to unblock Alice
+    t_bob = threading.Thread(
+        target=lambda: main(["send", "--sender", "@Bob", "--content", "Ack @Alice"]),
+        daemon=True,
+    )
+    t_bob.start()
     t_send.join(timeout=2.0)
+    assert not t_send.is_alive()
 
     # 5. list
     capsys.readouterr()

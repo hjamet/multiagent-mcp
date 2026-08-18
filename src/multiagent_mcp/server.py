@@ -128,22 +128,6 @@ def list_participants() -> dict:
 
 
 @mcp.tool()
-async def wait_for_turn(
-    handle: str,
-) -> TurnResult:
-    """Wait indefinitely for your turn or incoming messages.
-
-    Args:
-        handle: Your participant handle (e.g. '@Alice').
-
-    Returns:
-        TurnResult containing turn status and new unread messages upon unblocking.
-    """
-    canonical = normalize_handle(handle)
-    return await room.wait_for_turn(agent_id=canonical)
-
-
-@mcp.tool()
 async def send_message(
     sender: str,
     content: str,

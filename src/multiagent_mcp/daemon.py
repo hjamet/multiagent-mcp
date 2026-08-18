@@ -232,13 +232,18 @@ class DaemonServer:
         content: str,
         private: Optional[Union[list[str], bool]] = False,
     ) -> dict:
-        """Post a message and wake all relevant waiting clients in RAM."""
+        """Post a message, wake other participants, and wait for sender's next turn."""
         canonical_sender = normalize_handle(sender)
         msg = await self.room.post_message(
             sender=canonical_sender,
             content=content,
             private=private,
         )
+
+        # Update sender's read cursor to the message just posted
+        if canonical_sender in self.room.participants:
+            self.room.participants[canonical_sender].last_read_seq_id = self.room.seq_counter
+            self.room._save_state()
 
         # Wake up relevant participants in memory
         if not msg.is_private:
@@ -249,57 +254,44 @@ class DaemonServer:
                 to_wake.add(self.room.active_turn)
             self._wake_handles(to_wake)
 
-        return {
-            "status": "sent",
-            "message": msg.model_dump(mode="json"),
-            "active_turn": self.room.active_turn,
-            "current_queue": list(self.room.turn_queue),
-        }
+        # Wait for sender's next turn or incoming messages
+        if canonical_sender not in self.room.participants:
+            raise ValueError(f"Participant {canonical_sender} not registered in room")
 
-    async def handle_wait(self, handle: str) -> dict:
-        """Wait for turn or unread messages without disk polling.
-
-        Returns immediately (< 0.5ms) if active_turn or unread messages exist,
-        otherwise awaits an in-memory Future.
-        """
-        canonical = normalize_handle(handle)
-        if canonical not in self.room.participants:
-            raise ValueError(f"Participant {canonical} not registered in room")
-
-        participant = self.room.participants[canonical]
-        unread = self._get_unread_messages(canonical)
+        participant = self.room.participants[canonical_sender]
+        unread = self._get_unread_messages(canonical_sender)
 
         # Fast path: active turn or unread messages already available
-        if self.room.active_turn == canonical or len(unread) > 0:
+        if self.room.active_turn == canonical_sender or len(unread) > 0:
             participant.last_read_seq_id = self.room.seq_counter
             self.room._save_state()
-            turn_res = self._build_turn_result(canonical, unread)
+            turn_res = self._build_turn_result(canonical_sender, unread)
             return turn_res.model_dump(mode="json")
 
         # Slow path: await in-memory future with zero disk polling
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self.waiting_clients.setdefault(canonical, []).append(fut)
+        self.waiting_clients.setdefault(canonical_sender, []).append(fut)
 
         try:
             await fut
         finally:
-            if canonical in self.waiting_clients:
-                if fut in self.waiting_clients[canonical]:
-                    self.waiting_clients[canonical].remove(fut)
-                if not self.waiting_clients[canonical]:
-                    del self.waiting_clients[canonical]
+            if canonical_sender in self.waiting_clients:
+                if fut in self.waiting_clients[canonical_sender]:
+                    self.waiting_clients[canonical_sender].remove(fut)
+                if not self.waiting_clients[canonical_sender]:
+                    del self.waiting_clients[canonical_sender]
 
         # Re-check state after in-memory wakeup
-        if canonical not in self.room.participants:
-            raise ValueError(f"Participant {canonical} not registered in room")
+        if canonical_sender not in self.room.participants:
+            raise ValueError(f"Participant {canonical_sender} not registered in room")
 
-        participant = self.room.participants[canonical]
-        unread = self._get_unread_messages(canonical)
+        participant = self.room.participants[canonical_sender]
+        unread = self._get_unread_messages(canonical_sender)
         participant.last_read_seq_id = self.room.seq_counter
         self.room._save_state()
 
-        turn_res = self._build_turn_result(canonical, unread)
+        turn_res = self._build_turn_result(canonical_sender, unread)
         return turn_res.model_dump(mode="json")
 
     def handle_list(self) -> dict:
@@ -338,10 +330,6 @@ class DaemonServer:
                     sender=req.get("sender") or req.get("handle") or "",
                     content=req.get("content", ""),
                     private=req.get("private", False),
-                )
-            elif action in ("wait", "wait_for_turn"):
-                res = await self.handle_wait(
-                    handle=req.get("handle") or req.get("agent_id") or req.get("sender") or ""
                 )
             elif action in ("list", "list_participants"):
                 res = self.handle_list()
@@ -499,12 +487,8 @@ class DaemonClient:
     async def send(
         self, sender: str, content: str, private: Optional[Union[list[str], bool]] = False
     ) -> dict:
-        """Post message via daemon."""
+        """Post message and wait for next turn via daemon."""
         return await self.request("send", sender=sender, content=content, private=private)
-
-    async def wait(self, handle: str) -> dict:
-        """Wait for turn or messages via daemon (< 0.5ms)."""
-        return await self.request("wait", handle=handle)
 
     async def list_participants(self) -> dict:
         """List room state via daemon."""

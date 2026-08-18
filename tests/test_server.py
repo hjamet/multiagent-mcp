@@ -164,6 +164,12 @@ async def test_send_message_private_explicit_recipients():
     )
     await asyncio.sleep(0.05)
 
+    # Validate file transcript has WARNING callouts for private message and header
+    assert room.filepath is not None
+    file_content_before = room.filepath.read_text(encoding="utf-8")
+    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content_before
+    assert "> 🔒 **Dernier message (Privé) :** **@Alice** ➔ @Bob" in file_content_before
+
     # Bob checks unread messages
     bob_res = await room.wait_for_turn("@Bob")
     assert len(bob_res.new_messages) == 1
@@ -178,11 +184,9 @@ async def test_send_message_private_explicit_recipients():
     await room.post_message(sender="@Bob", content="Reçu @Alice")
     await alice_task
 
-    # Validate file transcript has WARNING callouts for private message
-    assert room.filepath is not None
-    file_content = room.filepath.read_text(encoding="utf-8")
-    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content
-    assert "> 🔒 **Dernier message (Privé) :** **@Alice** ➔ @Bob" in file_content
+    # Validate file transcript still contains the private message body
+    file_content_after = room.filepath.read_text(encoding="utf-8")
+    assert "> [!WARNING] 🔒 Message Privé : @Alice ➔ @Bob" in file_content_after
 
 
 @pytest.mark.asyncio
