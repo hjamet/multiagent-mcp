@@ -168,7 +168,7 @@ Edit your `claude_desktop_config.json` (located at `%APPDATA%\Claude\claude_desk
 
 ## 🛠️ Tool Reference
 
-The server exposes 5 FastMCP tools:
+The server exposes 4 FastMCP tools:
 
 ```mermaid
 classDiagram
@@ -176,8 +176,7 @@ classDiagram
         +init_conversation(filepath, participants, topic) dict
         +join_conversation(handle, name, timeout_seconds) TurnResult
         +list_participants() dict
-        +send_message(sender, content, is_private, block_until_turn, timeout_seconds) TurnResult
-        +wait_for_turn(agent_id, timeout_seconds) TurnResult
+        +send_message(sender, content, is_private, timeout_seconds) TurnResult
     }
 ```
 
@@ -257,7 +256,7 @@ Queries current room participants, active turn speaker, turn queue, and total me
 ---
 
 ### 4. `send_message`
-Posts a public or private message to the room. Validates mentions, updates the turn queue, appends to the Markdown file, and optionally blocks until next turn.
+Posts a public or private message to the room. Validates mentions, updates the turn queue, appends to the Markdown file, and puts the sender into a waiting loop until it is their next turn or until a new message arrives, returning **only new unread messages** upon unblocking.
 
 **Parameters:**
 | Parameter | Type | Required | Default | Description |
@@ -265,8 +264,7 @@ Posts a public or private message to the room. Validates mentions, updates the t
 | `sender` | `str` | Yes | — | Sender handle (e.g. `'@Alice'`). |
 | `content` | `str` | Yes | — | Message content. **Must include at least one valid `@recipient` mention.** |
 | `is_private` | `bool` | No | `False` | If `True`, message is only visible to sender and tagged recipients. |
-| `block_until_turn` | `bool` | No | `True` | If `True`, blocks until next turn / new incoming message. |
-| `timeout_seconds` | `float` | No | `45.0` | Timeout when blocking. |
+| `timeout_seconds` | `float` | No | `45.0` | Max seconds to wait before yielding turn status. |
 
 **Returns (`TurnResult`):**
 ```json
@@ -275,36 +273,20 @@ Posts a public or private message to the room. Validates mentions, updates the t
   "active_turn": "@Alice",
   "new_messages": [
     {
-      "id": "b3e0c4a1-...",
-      "seq_id": 5,
+      "id": 4,
+      "seq_id": 4,
       "sender": "@Bob",
       "recipients": ["@Alice"],
-      "content": "I agree with your proposal @Alice! Let's proceed.",
+      "content": "I agree with your proposal @Alice.",
       "is_private": false,
-      "timestamp": "2026-08-18T10:22:15+00:00"
+      "timestamp": "2026-08-18T10:21:00+00:00"
     }
   ],
-  "current_queue": [],
-  "active_participants": ["@user", "@Alice", "@Bob"],
-  "system_notice": null
+  "current_queue": ["@user"],
+  "active_participants": ["@Alice", "@Bob", "@user"],
+  "system_notice": "Woken up by incoming message/mention for @Alice."
 }
 ```
-
----
-
-### 5. `wait_for_turn`
-Blocks execution until it is the participant's turn or new incoming unread messages arrive.
-
-**Parameters:**
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `agent_id` | `str` | Yes | — | Participant handle (e.g. `'@Bob'` or `'@user'`). |
-| `timeout_seconds` | `float` | No | `45.0` | Timeout in seconds. |
-
-**Returns (`TurnResult`):**
-- Returns `status: "your_turn"` when the agent has the floor.
-- Returns `status: "message_received"` when new messages are delivered without turn assignment.
-- Returns `status: "timeout"` when timeout expires without new events.
 
 ---
 

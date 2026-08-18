@@ -9,7 +9,6 @@ from multiagent_mcp.server import (
     mcp,
     room,
     send_message,
-    wait_for_turn,
 )
 
 __version__ = "0.1.0"
@@ -25,5 +24,4 @@ __all__ = [
     "join_conversation",
     "list_participants",
     "send_message",
-    "wait_for_turn",
 ]

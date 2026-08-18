@@ -12,7 +12,6 @@ from multiagent_mcp.server import (
     mcp,
     room,
     send_message,
-    wait_for_turn,
 )
 
 
@@ -50,7 +49,6 @@ def test_init_conversation_tool(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_join_conversation_first_and_subsequent_participants():
     """Test join_conversation blocking for first participant and unblocking on second."""
-    # First participant Alice joins in background (should block until Bob joins)
     alice_res: TurnResult | None = None
 
     async def join_alice():
@@ -94,8 +92,8 @@ def test_list_participants_tool():
 
 
 @pytest.mark.asyncio
-async def test_send_message_non_blocking_and_blocking(tmp_path: Path):
-    """Test send_message tool both non-blocking and blocking behaviors."""
+async def test_send_message_blocking_turn_taking(tmp_path: Path):
+    """Test send_message tool blocking until reply arrives."""
     transcript = tmp_path / "chat.md"
     room.init_room(filepath=str(transcript))
 
@@ -103,24 +101,14 @@ async def test_send_message_non_blocking_and_blocking(tmp_path: Path):
     await room.join_room("@Alice")
     await room.join_room("@Bob")
 
-    # Alice sends a message without blocking
-    res_sent = await send_message(
-        sender="@Alice",
-        content="Hello @Bob! What is the update?",
-        block_until_turn=False,
-    )
-    assert res_sent.status == "sent"
-    assert room.active_turn == "@Bob"
-
-    # Bob sends response and blocks until next turn/message
+    # Bob sends message and blocks waiting for Alice
     bob_res: TurnResult | None = None
 
     async def bob_turn():
         nonlocal bob_res
         bob_res = await send_message(
             sender="@Bob",
-            content="Everything is on track @Alice!",
-            block_until_turn=True,
+            content="Hello @Alice, what is your status?",
             timeout_seconds=2.0,
         )
 
@@ -128,17 +116,18 @@ async def test_send_message_non_blocking_and_blocking(tmp_path: Path):
     await asyncio.sleep(0.05)
 
     # Alice replies to Bob
-    await send_message(
+    alice_res = await send_message(
         sender="@Alice",
-        content="Great job @Bob!",
-        block_until_turn=False,
+        content="All systems operational @Bob!",
+        timeout_seconds=2.0,
     )
+
     await bob_task
 
     # Bob should unblock and see ONLY the new message from Alice
     assert bob_res is not None
     assert len(bob_res.new_messages) == 1
-    assert bob_res.new_messages[0].content == "Great job @Bob!"
+    assert bob_res.new_messages[0].content == "All systems operational @Bob!"
     assert bob_res.new_messages[0].sender == "@Alice"
 
 
@@ -152,22 +141,6 @@ async def test_send_message_mention_validation_error():
         await send_message(
             sender="@Alice",
             content="Message with no mentions at all",
-            block_until_turn=False,
+            timeout_seconds=0.1,
         )
     assert "Écrivez à au moins l'une des personnes suivantes : @Bob" in str(exc.value)
-
-
-@pytest.mark.asyncio
-async def test_wait_for_turn_tool():
-    """Test wait_for_turn tool directly."""
-    await room.join_room("@Alice")
-    await room.join_room("@Bob")
-
-    # Trigger turn for Bob
-    await room.post_message(sender="@Alice", content="Turn for @Bob")
-
-    # Bob waits for turn
-    res = await wait_for_turn("@Bob", timeout_seconds=1.0)
-    assert res.status == "your_turn"
-    assert len(res.new_messages) == 1
-    assert res.new_messages[0].content == "Turn for @Bob"

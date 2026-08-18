@@ -131,21 +131,21 @@ async def send_message(
     sender: str,
     content: str,
     is_private: bool = False,
-    block_until_turn: bool = True,
     timeout_seconds: float = 45.0,
 ) -> TurnResult:
     """Post a message to the conversation room with mandatory @mentions.
+
+    Puts the sender into a waiting loop until it is their next turn or until
+    a new message arrives, returning ONLY new unread messages when unblocked.
 
     Args:
         sender: Your participant handle (e.g. '@Alice').
         content: Message content. MUST contain at least one valid @recipient mention.
         is_private: If True, message is only visible to sender and mentioned recipients.
-        block_until_turn: If True, blocks until your next turn or until a new message arrives,
-                          returning ONLY new unread messages when unblocked.
-        timeout_seconds: Timeout in seconds when blocking for turn.
+        timeout_seconds: Max seconds to wait before yielding turn status.
 
     Returns:
-        TurnResult containing turn status and any new unread messages.
+        TurnResult containing turn status and new unread messages upon unblocking.
     """
     canonical_sender = normalize_handle(sender)
     await room.post_message(
@@ -154,41 +154,7 @@ async def send_message(
         is_private=is_private,
     )
 
-    if block_until_turn:
-        return await room.wait_for_turn(
-            agent_id=canonical_sender,
-            timeout_seconds=timeout_seconds,
-        )
-
-    status = "your_turn" if room.active_turn == canonical_sender else "sent"
-    return TurnResult(
-        status=status,
-        active_turn=room.active_turn,
-        new_messages=[],
-        current_queue=list(room.turn_queue),
-        active_participants=list(room.participants.keys()),
-        system_notice="Message sent successfully.",
-    )
-
-
-@mcp.tool()
-async def wait_for_turn(
-    agent_id: str,
-    timeout_seconds: float = 45.0,
-) -> TurnResult:
-    """Wait for next turn or incoming messages for a participant or @user.
-
-    Blocks until it is the participant's turn, a new message arrives, or timeout expires.
-
-    Args:
-        agent_id: Participant handle (e.g. '@Bob' or '@User').
-        timeout_seconds: Max seconds to wait before returning a timeout status.
-
-    Returns:
-        TurnResult with turn status, unread messages, active speaker, and queue.
-    """
-    canonical = normalize_handle(agent_id)
     return await room.wait_for_turn(
-        agent_id=canonical,
+        agent_id=canonical_sender,
         timeout_seconds=timeout_seconds,
     )
