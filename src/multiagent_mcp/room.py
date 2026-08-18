@@ -20,6 +20,8 @@ class RoomManager:
         self.messages: list[Message] = []
         self.priority_scores: dict[str, int] = {}
         self.mention_seq: dict[str, int] = {}
+        self.last_posted_message: Optional[Message] = None
+        self.last_message_by_participant: dict[str, Message] = {}
         self.active_turn: Optional[str] = None
         self.seq_counter: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -50,22 +52,76 @@ class RoomManager:
         matches = re.findall(r"@([a-zA-Z0-9_-]+)", clean_content)
         return [normalize_handle(m) for m in matches]
 
+    def _format_last_message_callout(self) -> str:
+        """Format a callout with the last message posted."""
+        if not self.last_posted_message:
+            return ""
+        msg = self.last_posted_message
+        time_str = msg.timestamp.strftime("%H:%M:%S UTC")
+        clean_content = msg.content.strip().replace("\r\n", "\n")
+        lines = clean_content.split("\n")
+        first_lines = lines[:4]
+        quoted = "\n> ".join(first_lines)
+        if len(lines) > 4:
+            quoted += "\n> *(...)*"
+        lock = "🔒 [Privé] " if msg.is_private else ""
+        return (
+            f"> [!NOTE]\n"
+            f"> 💬 **Dernier message :** {lock}**{msg.sender}** à {time_str}\n"
+            f"> \n"
+            f"> {quoted}\n"
+        )
+
     def _format_participants_table(self) -> str:
-        """Format the participants table for markdown file."""
+        """Format the unified live participant & priority queue table sorted by urgency."""
+        def sort_key(p_handle: str):
+            is_active = 0 if p_handle == self.active_turn else 1
+            score = self.priority_scores.get(p_handle, 0)
+            seq = self.mention_seq.get(p_handle, 999999)
+            return (is_active, -score, seq, p_handle)
+
+        sorted_handles = sorted(self.participants.keys(), key=sort_key)
+
         lines = [
-            "## Participants",
-            "| Handle | Nom | Statut | Rejoint le |",
-            "|---|---|---|---|",
+            "## 📊 File d'Attente & État des Participants (Temps Réel)",
+            "| Participant | Priorité / Statut | Dernier Message Envoyé |",
+            "|---|---|---|",
         ]
-        for p in self.participants.values():
-            joined_str = p.joined_at.strftime("%Y-%m-%d %H:%M:%S")
-            lines.append(f"| {p.handle} | {p.name} | {p.status} | {joined_str} |")
+
+        for h in sorted_handles:
+            score = self.priority_scores.get(h, 0)
+            if h == self.active_turn:
+                if score > 0:
+                    status_str = f"🎯 **Tour Actif** ({score} mention{'s' if score > 1 else ''})"
+                else:
+                    status_str = "🎯 **Tour Actif**"
+            elif score > 0:
+                status_str = f"⏳ En attente ({score} mention{'s' if score > 1 else ''})"
+            else:
+                status_str = "💤 Sleeping (0 mention)"
+
+            last_msg = self.last_message_by_participant.get(h)
+            if last_msg:
+                time_str = last_msg.timestamp.strftime("%H:%M:%S")
+                snippet = last_msg.content.strip().replace("\n", " ")
+                if len(snippet) > 50:
+                    snippet = snippet[:47] + "..."
+                snippet = snippet.replace("|", "\\|")
+                msg_str = f"*{snippet}* ({time_str})"
+            else:
+                msg_str = "—"
+
+            lines.append(f"| **{h}** | {status_str} | {msg_str} |")
+
         return "\n".join(lines)
 
     def _update_file_header(self) -> None:
-        """Write or refresh the markdown transcript file header and participant table."""
+        """Write or refresh the markdown transcript file header and live priority table."""
         if not self.filepath:
             return
+
+        callout = self._format_last_message_callout()
+        table = self._format_participants_table()
 
         header = [
             "# Multi-Agent Room",
@@ -74,13 +130,17 @@ class RoomManager:
             f"- **Sujet :** {self.topic if self.topic else 'Discussion multi-agents'}",
             f"- **Initialisé le :** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
-            self._format_participants_table(),
+        ]
+        if callout:
+            header.append(callout)
+        header.extend([
+            table,
             "",
             "---",
             "",
             "## Fil de discussion",
             "",
-        ]
+        ])
         header_text = "\n".join(header)
 
         self.filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +177,8 @@ class RoomManager:
         self.messages.clear()
         self.priority_scores.clear()
         self.mention_seq.clear()
+        self.last_posted_message = None
+        self.last_message_by_participant.clear()
         self.active_turn = None
         self.seq_counter = 0
 
@@ -275,6 +337,10 @@ class RoomManager:
             )
         self._append_to_file(entry)
 
+        # Update last message tracking
+        self.last_posted_message = msg
+        self.last_message_by_participant[canonical_sender] = msg
+
         # Enqueue deduplicated mentioned agents (+1 score per mentioned agent)
         for target_handle in valid_recipients:
             self.priority_scores[target_handle] = (
@@ -302,6 +368,9 @@ class RoomManager:
                 self.events[next_speaker].set()
         else:
             self.active_turn = None
+
+        # Refresh header file on disk with newly elected active_turn, updated priorities, and latest message callout
+        self._update_file_header()
 
         # If public message, wake up all participants so waiting listeners get unread messages
         if not is_private:

@@ -263,3 +263,37 @@ async def test_all_mention_public_and_private_rejection(tmp_path: Path):
     with pytest.raises(ValueError) as exc:
         await rm.post_message(sender="@Alice", content="Secret to @all", is_private=True)
     assert "Impossible de mentionner @all dans un message privé" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_live_header_callout_and_urgency_sorting(tmp_path: Path):
+    room_file = tmp_path / "dashboard.md"
+    rm = RoomManager()
+    rm.init_room(filepath=str(room_file), topic="Live Dashboard Test")
+    await rm.join_room("@Alice")
+    await rm.join_room("@Bob")
+    await rm.join_room("@Charlie")
+
+    # Alice posts a message to Charlie
+    await rm.post_message(sender="@Alice", content="Message urgent pour @Charlie !")
+
+    content = room_file.read_text(encoding="utf-8")
+    # Check Callout exists
+    assert "> [!NOTE]" in content
+    assert "Dernier message :" in content
+    assert "@Alice" in content
+    assert "Message urgent pour @Charlie !" in content
+
+    # Check Unified table exists
+    assert "## 📊 File d'Attente & État des Participants (Temps Réel)" in content
+    assert "| Participant | Priorité / Statut | Dernier Message Envoyé |" in content
+    assert "🎯 **Tour Actif**" in content or "⏳ En attente" in content
+    assert "💤 Sleeping (0 mention)" in content
+
+    # Extract table section
+    table_section = content.split("## 📊 File d'Attente")[1].split("## Fil de discussion")[0]
+    charlie_pos = table_section.find("**@Charlie**")
+    alice_pos = table_section.find("**@Alice**")
+    assert charlie_pos != -1
+    assert alice_pos != -1
+    assert charlie_pos < alice_pos
