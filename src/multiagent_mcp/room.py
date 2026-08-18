@@ -11,9 +11,25 @@ from typing import Optional, Union
 
 from multiagent_mcp.models import Message, Participant, TurnResult, normalize_handle
 
-CONFIG_DIR = Path.home() / ".config" / "multiagent-mcp"
-DEFAULT_STATE_FILE = CONFIG_DIR / "default_room.state.json"
-ACTIVE_POINTER_FILE = CONFIG_DIR / "active_room.json"
+def get_config_dir() -> Path:
+    """Get the configuration directory from environment or default."""
+    env_dir = os.environ.get("MULTIAGENT_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / ".config" / "multiagent-mcp"
+
+
+def get_default_state_file() -> Path:
+    """Get the default fallback state file path."""
+    env_file = os.environ.get("MULTIAGENT_STATE_FILE")
+    if env_file:
+        return Path(env_file)
+    return get_config_dir() / "default_room.state.json"
+
+
+def get_active_pointer_file() -> Path:
+    """Get the active room pointer file path."""
+    return get_config_dir() / "active_room.json"
 
 
 class RoomManager:
@@ -48,29 +64,33 @@ class RoomManager:
         if self.filepath is not None:
             self._state_file = Path(f"{self.filepath}.state.json")
             return self._state_file
-        if ACTIVE_POINTER_FILE.exists():
+        pointer_file = get_active_pointer_file()
+        if pointer_file.exists():
             try:
-                data = json.loads(ACTIVE_POINTER_FILE.read_text(encoding="utf-8"))
+                data = json.loads(pointer_file.read_text(encoding="utf-8"))
                 p_str = data.get("state_file")
                 if p_str:
                     self._state_file = Path(p_str)
                     return self._state_file
             except Exception:
                 pass
-        self._state_file = DEFAULT_STATE_FILE
+        self._state_file = get_default_state_file()
         return self._state_file
 
     def _set_active_pointer(self) -> None:
         """Record active state file in global pointer file."""
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            cfg = get_config_dir()
+            cfg.mkdir(parents=True, exist_ok=True)
             target = self._get_state_file()
-            ACTIVE_POINTER_FILE.write_text(
+            pointer = get_active_pointer_file()
+            pointer.write_text(
                 json.dumps({"state_file": str(target.resolve())}, ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception:
             pass
+
 
     def _save_state(self) -> None:
         """Atomically persist current room state to JSON file."""

@@ -174,10 +174,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         print(f"Starting MultiAgentHub SSE server on {args.host}:{args.port}...")
-        try:
-            mcp.run(transport="sse", host=args.host, port=args.port)
-        except KeyboardInterrupt:
-            print("\nShutting down server.")
+        while True:
+            try:
+                mcp.run(transport="sse", host=args.host, port=args.port)
+            except KeyboardInterrupt:
+                print("\nShutting down server.")
+                break
+            except Exception as e:
+                print(f"\n[Warning] Server restarted after exception: {e}")
+                import time
+                time.sleep(0.5)
         return 0
 
     elif args.command == "stdio":
