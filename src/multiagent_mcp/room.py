@@ -749,22 +749,25 @@ class RoomManager:
         else:
             # Public message
             msg_is_private = False
-            if text_has_all:
+            for rm in raw_mentions:
+                rm_str = rm.lower()
+                if rm_str in ("@all", "all"):
+                    continue
+                target_handle = alias_map.get(rm_str) or alias_map.get(rm.lstrip("@").lower())
+                if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
+                    valid_recipients.append(target_handle)
+
+            # Check standalone alias mentions in text
+            for alias_key, target_handle in alias_map.items():
+                if target_handle != canonical_sender and target_handle not in valid_recipients:
+                    if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
+                        valid_recipients.append(target_handle)
+
+            # If no specific participant was mentioned, but @all is present, add all other participants
+            if not valid_recipients and text_has_all:
                 for h in self.participants.keys():
                     if h != canonical_sender and h not in valid_recipients:
                         valid_recipients.append(h)
-            else:
-                for rm in raw_mentions:
-                    rm_str = rm.lower()
-                    target_handle = alias_map.get(rm_str) or alias_map.get(rm.lstrip("@").lower())
-                    if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
-                        valid_recipients.append(target_handle)
-
-                # Check standalone alias mentions in text
-                for alias_key, target_handle in alias_map.items():
-                    if target_handle != canonical_sender and target_handle not in valid_recipients:
-                        if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
-                            valid_recipients.append(target_handle)
 
         # Rejection if 0 valid mentions / recipients
         if not valid_recipients:
