@@ -309,6 +309,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Display name",
     )
 
+    # Command: wait
+    wait_parser = subparsers.add_parser(
+        "wait",
+        help="Wait until active turn or targeted messages arrive",
+    )
+    wait_parser.add_argument(
+        "--handle",
+        "-H",
+        type=str,
+        required=True,
+        help="Participant handle (e.g. @Alice)",
+    )
+
     # Command: send
     send_parser = subparsers.add_parser(
         "send",
@@ -465,6 +478,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 
+    elif args.command == "wait":
+        payload = {
+            "handle": normalize_handle(args.handle),
+        }
+        res = send_request("wait", payload)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+
     elif args.command == "send":
         private_val: Union[list[str], bool] = False
         if args.private is not None:
@@ -508,6 +529,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             "client_msg_id": str(uuid.uuid4()),
         }
         res = send_request("whisper", payload)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+
+    elif args.command == "wait":
+        payload = {
+            "handle": normalize_handle(args.handle),
+        }
+        res = send_request("wait", payload)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 

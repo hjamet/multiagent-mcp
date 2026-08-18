@@ -227,9 +227,59 @@ class DaemonServer:
 
         if not all_joined:
             # Wait until all declared participants join
+            while True:
+                self.room._load_state()
+                all_joined = (
+                    len(self.room.participants) > 0
+                    and all(p.status == "active" for p in self.room.participants.values())
+                )
+                if all_joined:
+                    break
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                self.waiting_clients.setdefault(canonical, []).append(fut)
+                try:
+                    await fut
+                finally:
+                    if canonical in self.waiting_clients:
+                        if fut in self.waiting_clients[canonical]:
+                            self.waiting_clients[canonical].remove(fut)
+                        if not self.waiting_clients[canonical]:
+                            del self.waiting_clients[canonical]
+        else:
+            if self.room.active_turn is None and self.room.first_speaker:
+                self.room.active_turn = self.room.first_speaker
+                self.room._save_state()
+            self._wake_all()
+
+        # Block until it is the participant's turn or targeted messages arrive
+        while True:
+            self.room._load_state()
+            participant = self.room.participants.get(canonical, participant)
+            last_seq = participant.last_read_seq_id
+
+            unread = [
+                m
+                for m in self.room.messages
+                if m.seq_id > last_seq
+                and m.sender != canonical
+                and (not m.is_private or canonical in m.recipients)
+            ]
+
+            unread_targeted = [
+                m for m in unread if canonical in m.recipients and m.sender != "@System"
+            ]
+
+            if self.room.active_turn == canonical or len(unread_targeted) > 0:
+                participant.last_read_seq_id = self.room.seq_counter
+                self.room._save_state()
+                turn_res = self._build_turn_result(canonical, unread)
+                return turn_res.model_dump(mode="json")
+
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
             self.waiting_clients.setdefault(canonical, []).append(fut)
+
             try:
                 await fut
             finally:
@@ -238,36 +288,52 @@ class DaemonServer:
                         self.waiting_clients[canonical].remove(fut)
                     if not self.waiting_clients[canonical]:
                         del self.waiting_clients[canonical]
-        else:
-            if self.room.active_turn is None and self.room.first_speaker:
-                self.room.active_turn = self.room.first_speaker
-                self.room._save_state()
-            self._wake_all()
 
-        # Reload state after waking or barrier lifting
+    async def handle_wait(self, handle: str) -> dict:
+        """Wait until it is the participant's turn or targeted messages arrive."""
+        canonical = normalize_handle(handle)
         self.room._load_state()
-        participant = self.room.participants.get(canonical, participant)
-        unread = self._get_unread_messages(canonical)
-        participant.last_read_seq_id = self.room.seq_counter
-        self.room._save_state()
+        if canonical not in self.room.participants:
+            await self.room.join_room(canonical)
+            self.room._load_state()
 
-        status = "your_turn" if self.room.active_turn == canonical else "joined"
-        active_count = sum(1 for p in self.room.participants.values() if p.status == "active")
-        active_list = [p.handle for p in self.room.participants.values() if p.status == "active"]
-        notice = (
-            f"Transcript: '{self.room.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
-            if self.room.filepath
-            else None
-        )
-        return {
-            "status": status,
-            "participant": participant.model_dump(mode="json"),
-            "active_turn": self.room.active_turn,
-            "new_messages": [m.model_dump(mode="json") for m in unread],
-            "active_participants": active_list,
-            "current_queue": list(self.room.turn_queue),
-            "system_notice": notice or f"Joined room. Active participants: {active_count}",
-        }
+        participant = self.room.participants[canonical]
+
+        while True:
+            self.room._load_state()
+            participant = self.room.participants.get(canonical, participant)
+            last_seq = participant.last_read_seq_id
+
+            unread = [
+                m
+                for m in self.room.messages
+                if m.seq_id > last_seq
+                and m.sender != canonical
+                and (not m.is_private or canonical in m.recipients)
+            ]
+
+            unread_targeted = [
+                m for m in unread if canonical in m.recipients and m.sender != "@System"
+            ]
+
+            if self.room.active_turn == canonical or len(unread_targeted) > 0:
+                participant.last_read_seq_id = self.room.seq_counter
+                self.room._save_state()
+                turn_res = self._build_turn_result(canonical, unread)
+                return turn_res.model_dump(mode="json")
+
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            self.waiting_clients.setdefault(canonical, []).append(fut)
+
+            try:
+                await fut
+            finally:
+                if canonical in self.waiting_clients:
+                    if fut in self.waiting_clients[canonical]:
+                        self.waiting_clients[canonical].remove(fut)
+                    if not self.waiting_clients[canonical]:
+                        del self.waiting_clients[canonical]
 
     async def handle_send(
         self,
@@ -326,7 +392,7 @@ class DaemonServer:
             ]
 
             unread_targeted = [
-                m for m in unread if canonical_sender in m.recipients
+                m for m in unread if canonical_sender in m.recipients and m.sender != "@System"
             ]
 
             # Chantier 2: Wake condition
@@ -385,6 +451,10 @@ class DaemonServer:
                     handle=req.get("handle") or req.get("sender") or "",
                     name=req.get("name", ""),
                 )
+            elif action in ("wait", "wait_for_turn", "wait_for_message"):
+                res = await self.handle_wait(
+                    handle=req.get("handle") or req.get("sender") or "",
+                )
             elif action in ("send", "post_message", "send_message"):
                 res = await self.handle_send(
                     sender=req.get("sender") or req.get("handle") or "",
@@ -412,6 +482,10 @@ class DaemonServer:
                     client_msg_id=req.get("client_msg_id"),
                     broadcast=False,
                 )
+            elif action in ("wait", "wait_for_turn"):
+                canonical = normalize_handle(req.get("handle") or req.get("sender") or "")
+                turn_result = await self.room.wait_for_turn(agent_id=canonical)
+                res = turn_result.model_dump(mode="json")
             elif action in ("get_messages", "history", "read_messages"):
                 self.room._load_state()
                 canonical = normalize_handle(req.get("handle") or req.get("sender") or "")
@@ -591,6 +665,10 @@ class DaemonClient:
     async def join(self, handle: str, name: str = "") -> dict:
         """Join room via daemon."""
         return await self.request("join", handle=handle, name=name)
+
+    async def wait(self, handle: str) -> dict:
+        """Wait for turn or incoming messages via daemon."""
+        return await self.request("wait", handle=handle)
 
     async def send(
         self,

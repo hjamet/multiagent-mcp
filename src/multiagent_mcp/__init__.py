@@ -15,6 +15,9 @@ __all__ = [
     "join_conversation",
     "list_participants",
     "send_message",
+    "broadcast_message",
+    "whisper_message",
+    "wait_for_message",
 ]
 
 
@@ -35,6 +38,9 @@ def __getattr__(name: str) -> Any:
         "join_conversation",
         "list_participants",
         "send_message",
+        "broadcast_message",
+        "whisper_message",
+        "wait_for_message",
     ):
         import multiagent_mcp.server as srv
 

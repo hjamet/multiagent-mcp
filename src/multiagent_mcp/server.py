@@ -75,9 +75,8 @@ async def join_conversation(
 ) -> TurnResult:
     """Join the multi-agent conversation room.
 
-    Blocks until ALL declared participants have joined the room (all_joined barrier).
-    Once all participants have joined, returns status="your_turn" for first_speaker,
-    or status="joined" for other participants.
+    Blocks until ALL declared participants have joined the room (all_joined barrier),
+    and then blocks until it is your turn or you receive a direct message.
 
     Args:
         handle: Your participant handle (e.g. '@Alice' or 'Alice').
@@ -107,32 +106,34 @@ async def join_conversation(
 
     # All joined!
     room._load_state()
-    participant = room.participants[canonical]
-    unread = [
-        m
-        for m in room.messages
-        if m.seq_id > participant.last_read_seq_id
-        and m.sender != canonical
-        and (not m.is_private or canonical in m.recipients)
-    ]
-    participant.last_read_seq_id = room.seq_counter
-    room._save_state()
+    if room.active_turn == canonical:
+        participant = room.participants[canonical]
+        unread = [
+            m
+            for m in room.messages
+            if m.seq_id > participant.last_read_seq_id
+            and m.sender != canonical
+            and (not m.is_private or canonical in m.recipients)
+        ]
+        participant.last_read_seq_id = room.seq_counter
+        room._save_state()
 
-    status = "your_turn" if room.active_turn == canonical else "joined"
-    active_list = [p.handle for p in room.participants.values() if p.status == "active"]
-    notice = (
-        f"Transcript: '{room.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
-        if room.filepath
-        else None
-    )
-    return TurnResult(
-        status=status,
-        active_turn=room.active_turn,
-        new_messages=unread,
-        current_queue=list(room.turn_queue),
-        active_participants=active_list,
-        system_notice=notice or f"Joined room. Active participants: {len(active_list)}",
-    )
+        active_list = [p.handle for p in room.participants.values() if p.status == "active"]
+        notice = (
+            f"Transcript: '{room.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
+            if room.filepath
+            else None
+        )
+        return TurnResult(
+            status="your_turn",
+            active_turn=room.active_turn,
+            new_messages=unread,
+            current_queue=list(room.turn_queue),
+            active_participants=active_list,
+            system_notice=notice or f"Joined room. Active participants: {len(active_list)}",
+        )
+    else:
+        return await room.wait_for_turn(agent_id=canonical)
 
 
 @mcp.tool()
@@ -281,3 +282,25 @@ async def whisper_message(
     return await room.wait_for_turn(
         agent_id=canonical_sender,
     )
+
+
+@mcp.tool()
+async def wait_for_message(
+    handle: str,
+) -> TurnResult:
+    """Wait for turn or incoming messages for a participant in the conversation room.
+
+    Blocks until it is your turn to speak (active_turn == handle) or you receive
+    a direct/targeted message (unread_targeted > 0).
+
+    Args:
+        handle: Your participant handle (e.g. '@Alice').
+
+    Returns:
+        TurnResult containing turn status and new unread messages upon unblocking.
+    """
+    canonical = normalize_handle(handle)
+    return await room.wait_for_turn(
+        agent_id=canonical,
+    )
+

@@ -315,13 +315,12 @@ class RoomManager:
                 f"> > {quoted}\n\n"
             )
         else:
-            recipients_str = ", ".join(msg.recipients)
             quoted = "\n> ".join(first_lines)
             if len(lines) > 4:
                 quoted += "\n> *(...)*"
             return (
                 f"> [!NOTE]\n"
-                f"> 💬 **Dernier message :** **{msg.sender}** ➔ {recipients_str} ({time_str})\n"
+                f"> 💬 **Dernier message :** **{msg.sender}** ({time_str})\n"
                 f"> \n"
                 f"> {quoted}\n\n"
             )
@@ -624,6 +623,25 @@ class RoomManager:
 
         return participant
 
+    def _format_markdown_entry(self, msg: Message) -> str:
+        """Format message into markdown transcript entry."""
+        time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+        if msg.is_private:
+            recipients_str = ", ".join(msg.recipients)
+            clean_text = msg.content.replace("\r\n", "\n")
+            content_indented = "\n> ".join(clean_text.split("\n"))
+            return (
+                f"### 🔒 [Privé] {msg.sender} ➔ {recipients_str} ({time_str})\n\n"
+                f"> {content_indented}\n\n"
+                f"---"
+            )
+        else:
+            return (
+                f"### 💬 {msg.sender} ({time_str})\n\n"
+                f"{msg.content}\n\n"
+                f"---"
+            )
+
     async def post_message(
         self,
         sender: str,
@@ -672,10 +690,27 @@ class RoomManager:
                     "(et toutes les personnes mentionnées le verront)."
                 )
             for p in private:
-                p_str = str(p).strip().lower()
-                target_handle = alias_map.get(p_str) or alias_map.get(normalize_handle(p_str).lower())
-                if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
-                    valid_recipients.append(target_handle)
+                p_str = str(p).strip()
+                if not p_str:
+                    continue
+                target_handle = alias_map.get(p_str.lower()) or alias_map.get(normalize_handle(p_str).lower()) or normalize_handle(p_str)
+                canonical_target = alias_map.get(target_handle.lower()) or target_handle
+                if canonical_target != canonical_sender and canonical_target not in valid_recipients:
+                    valid_recipients.append(canonical_target)
+
+            # Strict mention containment in private message (anti-fuite)
+            recipients_str = ", ".join(valid_recipients)
+            for m in raw_mentions:
+                m_str = m.lower()
+                target_handle = alias_map.get(m_str) or alias_map.get(m.lstrip("@").lower())
+                if target_handle == canonical_sender:
+                    continue
+                if target_handle is None or target_handle not in valid_recipients:
+                    raise ValueError(
+                        f"Impossible de mentionner {m} dans ce message privé : "
+                        f"cette personne ne fait pas partie des destinataires du chuchotement ({recipients_str}). "
+                        "Les apartés privés ne doivent pas citer de tiers non autorisés."
+                    )
 
         elif private is True:
             msg_is_private = True
@@ -697,6 +732,20 @@ class RoomManager:
                     if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
                         valid_recipients.append(target_handle)
 
+            # Strict mention containment in private message (anti-fuite)
+            recipients_str = ", ".join(valid_recipients)
+            for m in raw_mentions:
+                m_str = m.lower()
+                target_handle = alias_map.get(m_str) or alias_map.get(m.lstrip("@").lower())
+                if target_handle == canonical_sender:
+                    continue
+                if target_handle is None or target_handle not in valid_recipients:
+                    raise ValueError(
+                        f"Impossible de mentionner {m} dans ce message privé : "
+                        f"cette personne ne fait pas partie des destinataires du chuchotement ({recipients_str}). "
+                        "Les apartés privés ne doivent pas citer de tiers non autorisés."
+                    )
+
         else:
             # Public message
             msg_is_private = False
@@ -717,11 +766,6 @@ class RoomManager:
                         if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
                             valid_recipients.append(target_handle)
 
-                if broadcast and not valid_recipients:
-                    for h in self.participants.keys():
-                        if h != canonical_sender and h not in valid_recipients:
-                            valid_recipients.append(h)
-
         # Rejection if 0 valid mentions / recipients
         if not valid_recipients:
             available_handles = sorted(
@@ -729,8 +773,11 @@ class RoomManager:
             )
             if not available_handles:
                 available_handles = sorted(list(self.participants.keys()))
+            participants_str = ", ".join(available_handles)
             error_str = (
-                f"Écrivez à au moins l'une des personnes suivantes : {', '.join(available_handles)}, ou @all"
+                f"Impossible d'envoyer un message sans mention. Veuillez mentionner au moins un participant "
+                f"ou @all dans votre message pour désigner la ou les prochaines personnes à qui la parole sera distribuée. "
+                f"Participants disponibles : {participants_str}."
             )
             raise ValueError(error_str)
 
@@ -775,22 +822,7 @@ class RoomManager:
         self.messages.append(msg)
 
         # Format markdown transcript
-        time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
-        recipients_str = ", ".join(valid_recipients)
-        if msg_is_private:
-            clean_text = content.replace("\r\n", "\n")
-            content_indented = "\n> ".join(clean_text.split("\n"))
-            entry = (
-                f"### 🔒 [Privé] {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
-                f"> {content_indented}\n\n"
-                f"---"
-            )
-        else:
-            entry = (
-                f"### 💬 {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
-                f"{content}\n\n"
-                f"---"
-            )
+        entry = self._format_markdown_entry(msg)
         self._append_to_file(entry)
 
         # Update last message tracking
@@ -863,7 +895,7 @@ class RoomManager:
             ]
 
             unread_targeted = [
-                m for m in unread if canonical in m.recipients
+                m for m in unread if canonical in m.recipients and m.sender != "@System"
             ]
 
             # Chantier 2: Wake condition

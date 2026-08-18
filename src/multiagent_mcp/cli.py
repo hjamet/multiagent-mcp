@@ -18,6 +18,7 @@ def __getattr__(name: str) -> Any:
         "send_message",
         "broadcast_message",
         "whisper_message",
+        "wait_for_message",
     ):
         import multiagent_mcp.server as srv
 
