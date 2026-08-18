@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Optional, Union
 
-from multiagent_mcp.models import Message, Participant, TurnResult, normalize_handle
+from multiagent_mcp.models import Message, Participant, TurnResult, normalize_handle, parse_aliases
 
 def get_config_dir() -> Path:
     """Get the configuration directory from environment or default."""
@@ -45,6 +45,7 @@ class RoomManager:
         self._state_file: Optional[Path] = Path(state_file) if state_file else None
         self.topic: str = ""
         self.participants: dict[str, Participant] = {}
+        self.aliases: dict[str, list[str]] = {}
         self.events: dict[str, asyncio.Event] = {}
         self.messages: list[Message] = []
         self.priority_scores: dict[str, int] = {}
@@ -120,6 +121,7 @@ class RoomManager:
                 "active_turn": self.active_turn,
                 "priority_scores": self.priority_scores,
                 "mention_seq": self.mention_seq,
+                "aliases": self.aliases,
                 "participants": {
                     handle: p.model_dump(mode="json")
                     for handle, p in self.participants.items()
@@ -192,6 +194,7 @@ class RoomManager:
         self.active_turn = data.get("active_turn")
         self.priority_scores = data.get("priority_scores", {})
         self.mention_seq = data.get("mention_seq", {})
+        self.aliases = data.get("aliases", {})
 
         loaded_participants = {}
         for handle, p_dict in data.get("participants", {}).items():
@@ -224,6 +227,23 @@ class RoomManager:
                 self.last_message_by_participant[m.sender] = m
 
         return True
+
+    def _get_alias_map(self) -> dict[str, str]:
+        """Build lookup dictionary mapping lowercase handles and alias names to canonical handles."""
+        mapping: dict[str, str] = {}
+        for handle in self.participants.keys():
+            mapping[handle.lower()] = handle
+            mapping[handle.lstrip("@").lower()] = handle
+
+        for handle, alias_list in self.aliases.items():
+            canonical = normalize_handle(handle)
+            for alias in alias_list:
+                clean_alias = str(alias).strip()
+                if clean_alias:
+                    mapping[clean_alias.lower()] = canonical
+                    mapping[normalize_handle(clean_alias).lower()] = canonical
+                    mapping[clean_alias.lstrip("@").lower()] = canonical
+        return mapping
 
     def _get_event(self, handle: str) -> asyncio.Event:
         """Get or recreate asyncio.Event bound to the current running event loop."""
@@ -270,7 +290,7 @@ class RoomManager:
     def _extract_mentions(self, content: str) -> list[str]:
         """Extract all @mentions from message content outside code blocks."""
         clean_content = self._strip_code_blocks(content)
-        matches = re.findall(r"@([a-zA-Z0-9_-]+)", clean_content)
+        matches = re.findall(r"@([a-zA-Z0-9_\u00C0-\u017F-]+)", clean_content)
         return [normalize_handle(m) for m in matches]
 
     def _format_last_message_callout(self) -> str:
@@ -425,6 +445,7 @@ class RoomManager:
         participants: Optional[list[str]] = None,
         topic: str = "",
         first_speaker: Optional[str] = None,
+        aliases: Optional[Union[dict[str, list[str]], list[str]]] = None,
         force: bool = False,
     ) -> None:
         """Initialize or reset the room, clear memory, and create markdown and state files."""
@@ -463,6 +484,7 @@ class RoomManager:
 
         self.topic = topic
         self.participants.clear()
+        self.aliases = parse_aliases(aliases)
         self.events.clear()
         self.messages.clear()
         self.priority_scores.clear()
@@ -482,11 +504,13 @@ class RoomManager:
 
         if norm_participants:
             for canonical in norm_participants:
+                p_aliases = self.aliases.get(canonical, [])
                 self.participants[canonical] = Participant(
                     name=canonical.lstrip("@"),
                     handle=canonical,
                     status="not_joined",
                     last_read_seq_id=0,
+                    aliases=p_aliases,
                 )
                 self.events[canonical] = asyncio.Event()
                 self.priority_scores[canonical] = 0
@@ -521,6 +545,8 @@ class RoomManager:
             was_active = (participant.status == "active")
             if name:
                 participant.name = disp_name
+            if not participant.aliases and canonical in self.aliases:
+                participant.aliases = self.aliases[canonical]
             participant.status = "active"
             self._get_event(canonical)
             if canonical not in self.priority_scores:
@@ -528,11 +554,13 @@ class RoomManager:
             if canonical not in self.mention_seq:
                 self.mention_seq[canonical] = 0
         else:
+            p_aliases = self.aliases.get(canonical, [])
             participant = Participant(
                 name=disp_name,
                 handle=canonical,
                 status="active",
                 last_read_seq_id=0,
+                aliases=p_aliases,
             )
             self.participants[canonical] = participant
             self._get_event(canonical)
@@ -603,6 +631,7 @@ class RoomManager:
         private: Optional[Union[list[str], bool]] = False,
         is_private: Optional[Union[list[str], bool]] = None,
         client_msg_id: Optional[str] = None,
+        broadcast: bool = False,
     ) -> Message:
         """Post a message to the room with mention validation, turn queueing, and transcript logging."""
         self._load_state()
@@ -610,6 +639,13 @@ class RoomManager:
             private = is_private
 
         canonical_sender = normalize_handle(sender)
+
+        # Chantier 3: Turn enforcement
+        if self.active_turn is not None and canonical_sender != self.active_turn:
+            raise PermissionError(
+                f"Ce n'est pas votre tour de parler (tour actif: {self.active_turn}). "
+                "Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour."
+            )
 
         # Ensure sender is registered and active
         if canonical_sender not in self.participants or self.participants[canonical_sender].status != "active":
@@ -621,26 +657,25 @@ class RoomManager:
         raw_mentions_lower = [rm.lower() for rm in raw_mentions]
         text_has_all = "@all" in raw_mentions_lower or "all" in raw_mentions_lower
 
-        handle_map = {h.lower(): h for h in self.participants.keys()}
+        alias_map = self._get_alias_map()
+        clean_content = self._strip_code_blocks(content)
         msg_is_private = False
         valid_recipients: list[str] = []
 
         if isinstance(private, list) and len(private) > 0:
             msg_is_private = True
             # Reject @all in private list or text
-            if any(normalize_handle(p).lower() in ("@all", "all") for p in private) or text_has_all:
+            if any(normalize_handle(str(p)).lower() in ("@all", "all") for p in private) or text_has_all:
                 raise ValueError(
                     "Impossible de mentionner @all dans un message privé. "
                     "Seules les personnes explicitement mentionnées verront ce message "
                     "(et toutes les personnes mentionnées le verront)."
                 )
             for p in private:
-                p_canonical = normalize_handle(p)
-                p_lower = p_canonical.lower()
-                if p_lower in handle_map:
-                    target_handle = handle_map[p_lower]
-                    if target_handle != canonical_sender and target_handle not in valid_recipients:
-                        valid_recipients.append(target_handle)
+                p_str = str(p).strip().lower()
+                target_handle = alias_map.get(p_str) or alias_map.get(normalize_handle(p_str).lower())
+                if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
+                    valid_recipients.append(target_handle)
 
         elif private is True:
             msg_is_private = True
@@ -651,10 +686,15 @@ class RoomManager:
                     "(et toutes les personnes mentionnées le verront)."
                 )
             for rm in raw_mentions:
-                rm_lower = rm.lower()
-                if rm_lower in handle_map:
-                    target_handle = handle_map[rm_lower]
-                    if target_handle != canonical_sender and target_handle not in valid_recipients:
+                rm_str = rm.lower()
+                target_handle = alias_map.get(rm_str) or alias_map.get(rm.lstrip("@").lower())
+                if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
+                    valid_recipients.append(target_handle)
+
+            # Check standalone alias mentions in text
+            for alias_key, target_handle in alias_map.items():
+                if target_handle != canonical_sender and target_handle not in valid_recipients:
+                    if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
                         valid_recipients.append(target_handle)
 
         else:
@@ -666,11 +706,21 @@ class RoomManager:
                         valid_recipients.append(h)
             else:
                 for rm in raw_mentions:
-                    rm_lower = rm.lower()
-                    if rm_lower in handle_map:
-                        target_handle = handle_map[rm_lower]
-                        if target_handle != canonical_sender and target_handle not in valid_recipients:
+                    rm_str = rm.lower()
+                    target_handle = alias_map.get(rm_str) or alias_map.get(rm.lstrip("@").lower())
+                    if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
+                        valid_recipients.append(target_handle)
+
+                # Check standalone alias mentions in text
+                for alias_key, target_handle in alias_map.items():
+                    if target_handle != canonical_sender and target_handle not in valid_recipients:
+                        if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
                             valid_recipients.append(target_handle)
+
+                if broadcast and not valid_recipients:
+                    for h in self.participants.keys():
+                        if h != canonical_sender and h not in valid_recipients:
+                            valid_recipients.append(h)
 
         # Rejection if 0 valid mentions / recipients
         if not valid_recipients:
@@ -728,8 +778,8 @@ class RoomManager:
         time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
         recipients_str = ", ".join(valid_recipients)
         if msg_is_private:
-            clean_content = content.replace("\r\n", "\n")
-            content_indented = "\n> ".join(clean_content.split("\n"))
+            clean_text = content.replace("\r\n", "\n")
+            content_indented = "\n> ".join(clean_text.split("\n"))
             entry = (
                 f"### 🔒 [Privé] {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
                 f"> {content_indented}\n\n"
@@ -776,12 +826,12 @@ class RoomManager:
         self._update_file_header()
         self._save_state()
 
-        # Wake up listeners
-        if not msg_is_private:
-            for h in self.participants.keys():
-                self._get_event(h).set()
-        else:
-            for r in valid_recipients:
+        # Chantier 2: Wake up listeners (ONLY targeted recipients + next active turn)
+        to_wake_handles = set(valid_recipients)
+        if self.active_turn:
+            to_wake_handles.add(self.active_turn)
+        for r in to_wake_handles:
+            if r in self.participants:
                 self._get_event(r).set()
 
         return msg
@@ -812,7 +862,12 @@ class RoomManager:
                 and (not m.is_private or canonical in m.recipients)
             ]
 
-            if self.active_turn == canonical or len(unread) > 0:
+            unread_targeted = [
+                m for m in unread if canonical in m.recipients
+            ]
+
+            # Chantier 2: Wake condition
+            if self.active_turn == canonical or len(unread_targeted) > 0:
                 break
 
             evt.clear()
@@ -868,6 +923,7 @@ class RoomManager:
                     "handle": p.handle,
                     "name": p.name,
                     "status": p.status,
+                    "aliases": p.aliases,
                     "joined_at": p.joined_at.isoformat(),
                     "last_read_seq_id": p.last_read_seq_id,
                 }
@@ -876,6 +932,7 @@ class RoomManager:
             "active_participants": [
                 p.handle for p in self.participants.values() if p.status == "active"
             ],
+            "aliases": self.aliases,
             "active_turn": self.active_turn,
             "first_speaker": self.first_speaker,
             "turn_queue": list(self.turn_queue),

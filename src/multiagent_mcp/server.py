@@ -17,7 +17,7 @@ except ImportError:
     except ImportError:
         from mcp.server import MCPServer as FastMCP
 
-from multiagent_mcp.models import TurnResult, normalize_handle
+from multiagent_mcp.models import TurnResult, normalize_handle, parse_aliases
 from multiagent_mcp.room import RoomManager
 
 # Shared room and MCP instance
@@ -31,6 +31,7 @@ def init_conversation(
     participants: list[str],
     topic: str = "",
     first_speaker: Optional[str] = None,
+    aliases: Optional[Union[dict[str, list[str]], list[str]]] = None,
     force: bool = False,
 ) -> dict:
     """Initialize a multi-agent conversation room with a markdown transcript file.
@@ -42,6 +43,7 @@ def init_conversation(
         participants: List of participant handles (e.g. ['@Alice', '@Bob', '@User']).
         topic: Initial topic or context of the conversation.
         first_speaker: Initial first speaker handle (e.g. '@Alice'). Defaults to first participant.
+        aliases: Optional mapping of handles to alias lists (e.g. {'@Isabelle': ['Cupidon']}).
         force: Force overwrite existing conversation files.
 
     Returns:
@@ -52,6 +54,7 @@ def init_conversation(
         participants=participants,
         topic=topic,
         first_speaker=first_speaker,
+        aliases=aliases,
         force=force,
     )
     return {
@@ -60,6 +63,7 @@ def init_conversation(
         "topic": topic,
         "participants": [normalize_handle(p) for p in (participants or [])],
         "first_speaker": room.first_speaker,
+        "aliases": room.aliases,
         "message": f"Room initialized with {len(participants or [])} participants.",
     }
 
@@ -176,10 +180,102 @@ async def send_message(
         private = is_private
 
     canonical_sender = normalize_handle(sender)
+    room._load_state()
+
+    if room.active_turn is not None and canonical_sender != room.active_turn:
+        return TurnResult(
+            status="not_your_turn",
+            active_turn=room.active_turn,
+            current_queue=list(room.turn_queue),
+            active_participants=[p.handle for p in room.participants.values() if p.status == "active"],
+            system_notice=f"Ce n'est pas votre tour de parler (tour actif: {room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+            error=f"Ce n'est pas votre tour de parler (tour actif: {room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+        )
+
     await room.post_message(
         sender=canonical_sender,
         content=content,
         private=private,
+    )
+
+    return await room.wait_for_turn(
+        agent_id=canonical_sender,
+    )
+
+
+@mcp.tool()
+async def broadcast_message(
+    sender: str,
+    content: str,
+) -> TurnResult:
+    """Broadcast a public message to the conversation room (public guaranteed).
+
+    Args:
+        sender: Your participant handle (e.g. '@Alice').
+        content: Public message content with optional @mentions.
+
+    Returns:
+        TurnResult containing turn status and new unread messages upon unblocking.
+    """
+    canonical_sender = normalize_handle(sender)
+    room._load_state()
+
+    if room.active_turn is not None and canonical_sender != room.active_turn:
+        return TurnResult(
+            status="not_your_turn",
+            active_turn=room.active_turn,
+            current_queue=list(room.turn_queue),
+            active_participants=[p.handle for p in room.participants.values() if p.status == "active"],
+            system_notice=f"Ce n'est pas votre tour de parler (tour actif: {room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+            error=f"Ce n'est pas votre tour de parler (tour actif: {room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+        )
+
+    await room.post_message(
+        sender=canonical_sender,
+        content=content,
+        private=False,
+        broadcast=True,
+    )
+
+    return await room.wait_for_turn(
+        agent_id=canonical_sender,
+    )
+
+
+@mcp.tool()
+async def whisper_message(
+    sender: str,
+    target: Union[str, list[str]],
+    content: str,
+) -> TurnResult:
+    """Send a private whisper message to specific target participant(s) or alias(es) (private guaranteed).
+
+    Args:
+        sender: Your participant handle (e.g. '@Alice').
+        target: Target recipient handle or list of handles/aliases (e.g. '@Bob' or ['@Bob', 'Cupidon']).
+        content: Private message content.
+
+    Returns:
+        TurnResult containing turn status and new unread messages upon unblocking.
+    """
+    canonical_sender = normalize_handle(sender)
+    room._load_state()
+
+    if room.active_turn is not None and canonical_sender != room.active_turn:
+        return TurnResult(
+            status="not_your_turn",
+            active_turn=room.active_turn,
+            current_queue=list(room.turn_queue),
+            active_participants=[p.handle for p in room.participants.values() if p.status == "active"],
+            system_notice=f"Ce n'est pas votre tour de parler (tour actif: {room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+            error=f"Ce n'est pas votre tour de parler (tour actif: {room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+        )
+
+    targets = [target] if isinstance(target, str) else target
+    await room.post_message(
+        sender=canonical_sender,
+        content=content,
+        private=targets,
     )
 
     return await room.wait_for_turn(

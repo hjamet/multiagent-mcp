@@ -16,6 +16,8 @@ def __getattr__(name: str) -> Any:
         "join_conversation",
         "list_participants",
         "send_message",
+        "broadcast_message",
+        "whisper_message",
     ):
         import multiagent_mcp.server as srv
 

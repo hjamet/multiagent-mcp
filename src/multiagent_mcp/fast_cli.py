@@ -275,6 +275,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Initial first speaker handle (e.g. @MJ)",
     )
     init_parser.add_argument(
+        "--alias",
+        "-a",
+        action="append",
+        default=[],
+        help="Participant alias mapping (e.g. -a '@Isabelle:Cupidon' -a '@Charlie:Voyante')",
+    )
+    init_parser.add_argument(
         "--force",
         "-F",
         action="store_true",
@@ -326,6 +333,54 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         default=None,
         help="Private message recipients list (e.g. @Bob @Charlie) or flag",
+    )
+
+    # Command: broadcast
+    broadcast_parser = subparsers.add_parser(
+        "broadcast",
+        help="Broadcast a public message to the room (public guaranteed)",
+    )
+    broadcast_parser.add_argument(
+        "--sender",
+        "-s",
+        type=str,
+        required=True,
+        help="Sender handle (e.g. @Alice)",
+    )
+    broadcast_parser.add_argument(
+        "--content",
+        "-c",
+        type=str,
+        required=True,
+        help="Public message content with optional @mentions",
+    )
+
+    # Command: whisper
+    whisper_parser = subparsers.add_parser(
+        "whisper",
+        help="Send a private message to specific participant(s) (private guaranteed)",
+    )
+    whisper_parser.add_argument(
+        "--sender",
+        "-s",
+        type=str,
+        required=True,
+        help="Sender handle (e.g. @Alice)",
+    )
+    whisper_parser.add_argument(
+        "--target",
+        "-t",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Target recipient handle(s) or alias(es) (e.g. @Bob or Cupidon)",
+    )
+    whisper_parser.add_argument(
+        "--content",
+        "-c",
+        type=str,
+        required=True,
+        help="Private message content",
     )
 
     # Command: list
@@ -387,11 +442,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if args.command == "init":
+        from multiagent_mcp.models import parse_aliases
+        aliases_dict = parse_aliases(args.alias) if args.alias else {}
         payload = {
             "file": args.file,
             "participants": [normalize_handle(p) for p in args.participants],
             "topic": args.topic,
             "first_speaker": normalize_handle(args.first_speaker) if args.first_speaker else None,
+            "aliases": aliases_dict,
             "force": bool(args.force),
         }
         res = send_request("init", payload)
@@ -426,6 +484,30 @@ def main(argv: Optional[list[str]] = None) -> int:
             "client_msg_id": str(uuid.uuid4()),
         }
         res = send_request("send", payload)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+
+    elif args.command == "broadcast":
+        payload = {
+            "sender": normalize_handle(args.sender),
+            "content": args.content,
+            "private": False,
+            "broadcast": True,
+            "client_msg_id": str(uuid.uuid4()),
+        }
+        res = send_request("broadcast", payload)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+
+    elif args.command == "whisper":
+        targets = [t.strip() for t in args.target if t.strip()]
+        payload = {
+            "sender": normalize_handle(args.sender),
+            "target": targets,
+            "content": args.content,
+            "client_msg_id": str(uuid.uuid4()),
+        }
+        res = send_request("whisper", payload)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 

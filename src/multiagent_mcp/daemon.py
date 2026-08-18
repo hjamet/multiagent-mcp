@@ -191,6 +191,7 @@ class DaemonServer:
         participants: Optional[list[str]] = None,
         topic: str = "",
         first_speaker: Optional[str] = None,
+        aliases: Optional[Union[dict[str, list[str]], list[str]]] = None,
         force: bool = False,
     ) -> dict:
         """Initialize room state and transcript file."""
@@ -199,6 +200,7 @@ class DaemonServer:
             participants=participants,
             topic=topic,
             first_speaker=first_speaker,
+            aliases=aliases,
             force=force,
         )
         self._wake_all()
@@ -208,6 +210,7 @@ class DaemonServer:
             "topic": self.room.topic,
             "participants": [p.handle for p in self.room.participants.values()],
             "first_speaker": self.room.first_speaker,
+            "aliases": self.room.aliases,
             "message": f"Room initialized with {len(self.room.participants)} participants.",
         }
 
@@ -272,8 +275,9 @@ class DaemonServer:
         content: str,
         private: Optional[Union[list[str], bool]] = False,
         client_msg_id: Optional[str] = None,
+        broadcast: bool = False,
     ) -> dict:
-        """Post a message, wake other participants, and wait for sender's next turn."""
+        """Post a message, wake targeted participants, and wait for sender's next turn."""
         self.room._load_state()
         canonical_sender = normalize_handle(sender)
         if canonical_sender not in self.room.participants:
@@ -282,34 +286,52 @@ class DaemonServer:
 
         participant = self.room.participants[canonical_sender]
 
+        # Chantier 3: Turn Enforcement
+        if self.room.active_turn is not None and canonical_sender != self.room.active_turn:
+            return {
+                "status": "not_your_turn",
+                "active_turn": self.room.active_turn,
+                "error": f"Ce n'est pas votre tour de parler (tour actif: {self.room.active_turn}). Arrêtez-vous ou restez en attente : vous serez automatiquement réveillé lorsque ce sera votre tour.",
+                "current_queue": list(self.room.turn_queue),
+                "active_participants": [p.handle for p in self.room.participants.values() if p.status == "active"],
+            }
+
+        # Chantier 1: Save sequence pointer before posting
+        last_seq_before_post = participant.last_read_seq_id
+
         msg = await self.room.post_message(
             sender=canonical_sender,
             content=content,
             private=private,
             client_msg_id=client_msg_id,
+            broadcast=broadcast,
         )
-        participant.last_read_seq_id = msg.seq_id
 
-        # Wake up relevant participants in memory
-        if not msg.is_private:
-            self._wake_all()
-        else:
-            to_wake = set(msg.recipients)
-            if self.room.active_turn:
-                to_wake.add(self.room.active_turn)
-            self._wake_handles(to_wake)
+        # Chantier 2: Wake up ONLY targeted recipients + next active turn
+        to_wake = set(msg.recipients)
+        if self.room.active_turn:
+            to_wake.add(self.room.active_turn)
+        self._wake_handles(to_wake)
 
-        # Wait in loop until unread messages arrive or it becomes sender's turn
+        # Wait in loop until targeted unread messages arrive or it becomes sender's turn
         while True:
+            self.room._load_state()
             unread = [
                 m
                 for m in self.room.messages
-                if m.seq_id > msg.seq_id
+                if m.seq_id > last_seq_before_post
+                and m.seq_id != msg.seq_id
                 and m.sender != canonical_sender
                 and (not m.is_private or canonical_sender in m.recipients)
             ]
 
-            if self.room.active_turn == canonical_sender or len(unread) > 0:
+            unread_targeted = [
+                m for m in unread if canonical_sender in m.recipients
+            ]
+
+            # Chantier 2: Wake condition
+            if self.room.active_turn == canonical_sender or len(unread_targeted) > 0:
+                participant = self.room.participants.get(canonical_sender, participant)
                 participant.last_read_seq_id = self.room.seq_counter
                 self.room._save_state()
                 turn_res = self._build_turn_result(canonical_sender, unread)
@@ -355,6 +377,7 @@ class DaemonServer:
                     participants=req.get("participants"),
                     topic=req.get("topic", ""),
                     first_speaker=req.get("first_speaker") or req.get("firstSpeaker"),
+                    aliases=req.get("aliases") or req.get("alias"),
                     force=bool(req.get("force", False)),
                 )
             elif action in ("join", "join_room", "join_conversation"):
@@ -368,6 +391,26 @@ class DaemonServer:
                     content=req.get("content", ""),
                     private=req.get("private", False),
                     client_msg_id=req.get("client_msg_id"),
+                    broadcast=bool(req.get("broadcast", False)),
+                )
+            elif action in ("broadcast", "broadcast_message"):
+                res = await self.handle_send(
+                    sender=req.get("sender") or req.get("handle") or "",
+                    content=req.get("content", ""),
+                    private=False,
+                    client_msg_id=req.get("client_msg_id"),
+                    broadcast=True,
+                )
+            elif action in ("whisper", "whisper_message"):
+                targets = req.get("target") or req.get("targets") or req.get("recipient") or req.get("recipients")
+                if isinstance(targets, str):
+                    targets = [targets]
+                res = await self.handle_send(
+                    sender=req.get("sender") or req.get("handle") or "",
+                    content=req.get("content", ""),
+                    private=targets if targets else True,
+                    client_msg_id=req.get("client_msg_id"),
+                    broadcast=False,
                 )
             elif action in ("get_messages", "history", "read_messages"):
                 self.room._load_state()
@@ -531,6 +574,7 @@ class DaemonClient:
         participants: list[str],
         topic: str = "",
         first_speaker: Optional[str] = None,
+        aliases: Optional[Union[dict[str, list[str]], list[str]]] = None,
         force: bool = False,
     ) -> dict:
         """Initialize room via daemon."""
@@ -540,6 +584,7 @@ class DaemonClient:
             participants=participants,
             topic=topic,
             first_speaker=first_speaker,
+            aliases=aliases,
             force=force,
         )
 
@@ -548,10 +593,27 @@ class DaemonClient:
         return await self.request("join", handle=handle, name=name)
 
     async def send(
-        self, sender: str, content: str, private: Optional[Union[list[str], bool]] = False
+        self,
+        sender: str,
+        content: str,
+        private: Optional[Union[list[str], bool]] = False,
+        broadcast: bool = False,
     ) -> dict:
         """Post message and wait for next turn via daemon."""
-        return await self.request("send", sender=sender, content=content, private=private)
+        return await self.request(
+            "send", sender=sender, content=content, private=private, broadcast=broadcast
+        )
+
+    async def broadcast(self, sender: str, content: str) -> dict:
+        """Broadcast a guaranteed public message via daemon."""
+        return await self.request("broadcast", sender=sender, content=content)
+
+    async def whisper(
+        self, sender: str, target: Union[str, list[str]], content: str
+    ) -> dict:
+        """Send a guaranteed private message to target participant(s) via daemon."""
+        targets = [target] if isinstance(target, str) else target
+        return await self.request("whisper", sender=sender, target=targets, content=content)
 
     async def list_participants(self) -> dict:
         """List room state via daemon."""
