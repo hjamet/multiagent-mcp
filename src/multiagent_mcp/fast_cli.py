@@ -91,6 +91,53 @@ def get_python_exe() -> str:
     return exe
 
 
+def get_spawn_lock_file(config_dir: Optional[pathlib.Path] = None) -> pathlib.Path:
+    """Return the path to daemon.spawn.lock file."""
+    cfg = config_dir or get_config_dir()
+    return cfg / "daemon.spawn.lock"
+
+
+def try_acquire_spawn_lock(config_dir: Optional[pathlib.Path] = None, stale_timeout: float = 10.0) -> bool:
+    """Try to atomically acquire daemon.spawn.lock using exclusive file creation.
+
+    Returns True if the lock was acquired, False if another process holds it.
+    Cleans up stale lock files older than stale_timeout.
+    """
+    cfg = config_dir or get_config_dir()
+    cfg.mkdir(parents=True, exist_ok=True)
+    lock_file = cfg / "daemon.spawn.lock"
+
+    if lock_file.exists():
+        try:
+            mtime = lock_file.stat().st_mtime
+            if time.time() - mtime > stale_timeout:
+                try:
+                    lock_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        fd = os.open(str(lock_file), flags)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"pid={os.getpid()}\ntimestamp={time.time()}\n")
+        return True
+    except (FileExistsError, OSError):
+        return False
+
+
+def release_spawn_lock(config_dir: Optional[pathlib.Path] = None) -> None:
+    """Release daemon.spawn.lock if present."""
+    lock_file = get_spawn_lock_file(config_dir)
+    try:
+        if lock_file.exists():
+            lock_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def spawn_daemon() -> None:
     """Start the daemon in a detached background process."""
     config_dir = get_config_dir()
@@ -119,23 +166,35 @@ def spawn_daemon() -> None:
 
 
 def ensure_daemon(max_wait_seconds: float = 5.0, host: str = DEFAULT_HOST, force_respawn: bool = False) -> int:
-    """Ensure the daemon is running and return its port number."""
+    """Ensure the daemon is running and return its port number with single-instance lock."""
+    config_dir = get_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+
     if not force_respawn:
         port = get_daemon_port()
         if port and is_port_reachable(port, host=host):
             return port
     else:
         # Cleanup stale discovery files if force_respawn
-        config_dir = get_config_dir()
-        for f in (config_dir / "daemon.json", config_dir / "daemon.port"):
+        for f in (config_dir / "daemon.json", config_dir / "daemon.port", config_dir / "daemon.spawn.lock"):
             try:
                 if f.exists():
                     f.unlink(missing_ok=True)
             except Exception:
                 pass
 
-    # Spawn daemon if not running or unreachable or force_respawn
-    spawn_daemon()
+    # Attempt to acquire atomic spawn lock to avoid split-brain daemon spawning
+    locked = try_acquire_spawn_lock(config_dir)
+    if locked:
+        try:
+            # Re-check port in case another process finished starting right before acquiring lock
+            port = get_daemon_port()
+            if not (port and is_port_reachable(port, host=host)):
+                spawn_daemon()
+        except Exception:
+            release_spawn_lock(config_dir)
+            raise
+    # If not locked: another process is currently spawning the daemon, simply wait below
 
     start = time.time()
     while time.time() - start < max_wait_seconds:
@@ -148,6 +207,10 @@ def ensure_daemon(max_wait_seconds: float = 5.0, host: str = DEFAULT_HOST, force
     port = get_daemon_port()
     if port and is_port_reachable(port, host=host):
         return port
+
+    # Cleanup lock if we were the owner and it timed out
+    if locked:
+        release_spawn_lock(config_dir)
 
     raise RuntimeError(
         f"Could not connect to multiagent-mcp daemon on {host} after {max_wait_seconds}s. "
@@ -457,6 +520,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "init":
         from multiagent_mcp.models import parse_aliases
         aliases_dict = parse_aliases(args.alias) if args.alias else {}
+        # Ensure daemon is pre-warmed and running
+        ensure_daemon()
         payload = {
             "file": args.file,
             "participants": [normalize_handle(p) for p in args.participants],
@@ -529,14 +594,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             "client_msg_id": str(uuid.uuid4()),
         }
         res = send_request("whisper", payload)
-        print(json.dumps(res, indent=2, ensure_ascii=False))
-        return 0
-
-    elif args.command == "wait":
-        payload = {
-            "handle": normalize_handle(args.handle),
-        }
-        res = send_request("wait", payload)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 

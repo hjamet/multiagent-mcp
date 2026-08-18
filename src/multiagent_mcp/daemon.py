@@ -93,6 +93,16 @@ def get_daemon_port(config_dir: Optional[Path] = None) -> Optional[int]:
     return None
 
 
+def is_port_reachable(port: int, host: str = "127.0.0.1", timeout: float = 0.1) -> bool:
+    """Check if the daemon port is reachable via socket connection."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ConnectionResetError, socket.timeout):
+        return False
+
+
 class DaemonServer:
     """High-speed in-memory IPC daemon coordinating turns without disk polling."""
 
@@ -114,7 +124,7 @@ class DaemonServer:
         self._active_connections: set[asyncio.StreamWriter] = set()
 
     def _save_discovery_files(self) -> None:
-        """Write daemon.json and daemon.port discovery files."""
+        """Write daemon.json and daemon.port discovery files and clean up spawn lock."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
         json_path, port_path = get_discovery_files(self.config_dir)
         info = {
@@ -125,15 +135,25 @@ class DaemonServer:
         }
         json_path.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
         port_path.write_text(str(self.port), encoding="utf-8")
+
+        # Cleanup daemon.spawn.lock as daemon is now ready and listening
+        lock_path = self.config_dir / "daemon.spawn.lock"
+        try:
+            if lock_path.exists():
+                lock_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.debug(f"Could not remove spawn lock {lock_path}: {e}")
+
         logger.info(f"Discovery files written to {json_path} and {port_path}")
 
     def _cleanup_discovery_files(self) -> None:
         """Remove daemon discovery files upon shutdown."""
         json_path, port_path = get_discovery_files(self.config_dir)
-        for p in (json_path, port_path):
+        lock_path = self.config_dir / "daemon.spawn.lock"
+        for p in (json_path, port_path, lock_path):
             try:
                 if p.exists():
-                    p.unlink()
+                    p.unlink(missing_ok=True)
             except Exception as e:
                 logger.warning(f"Failed to remove discovery file {p}: {e}")
 
@@ -729,7 +749,14 @@ def setup_signals(server: DaemonServer, loop: asyncio.AbstractEventLoop) -> None
 
 
 async def run_daemon(host: str = "127.0.0.1", port: int = 0) -> None:
-    """Run daemon server event loop."""
+    """Run daemon server event loop with single-instance check."""
+    existing_port = get_daemon_port()
+    if existing_port and is_port_reachable(existing_port, host=host):
+        logger.info(
+            f"MultiAgentHub IPC Daemon is already active and reachable on {host}:{existing_port}. Exiting."
+        )
+        return
+
     server = DaemonServer(host=host, port=port)
     loop = asyncio.get_running_loop()
     setup_signals(server, loop)
@@ -764,6 +791,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Single-Instance Guarantee: Exit immediately if daemon is already active and reachable
+    existing_port = get_daemon_port()
+    if existing_port and is_port_reachable(existing_port, host=args.host):
+        print(
+            f"MultiAgentHub IPC Daemon is already active and reachable on {args.host}:{existing_port}. Exiting."
+        )
+        return 0
 
     cfg_dir = get_config_dir()
     cfg_dir.mkdir(parents=True, exist_ok=True)
