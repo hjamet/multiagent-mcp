@@ -367,3 +367,41 @@ async def test_not_joined_status_transition_and_urgency_sorting(tmp_path: Path):
     charlie_idx = table_bob.find("**@Charlie**")
     assert bob_idx != -1 and alice_idx != -1 and charlie_idx != -1
     assert bob_idx < alice_idx < charlie_idx
+
+
+@pytest.mark.asyncio
+async def test_sender_does_not_lose_earlier_unread_messages_after_posting(tmp_path: Path):
+    """Test that Bob receives earlier unread messages even after posting a message himself before calling wait_for_turn."""
+    room_file = tmp_path / "unread_test.md"
+    rm = RoomManager()
+    rm.init_room(filepath=str(room_file), participants=["@Alice", "@Bob", "@Charlie"])
+    await rm.join_room("@Alice")
+    await rm.join_room("@Bob")
+    await rm.join_room("@Charlie")
+
+    # Bob clears arrival notices before conversation starts
+    await rm.wait_for_turn("@Bob", timeout_seconds=0.0)
+
+    # 1. Alice posts a message addressing Bob
+    msg_alice = await rm.post_message(sender="@Alice", content="Salut @Bob, voici la tâche.")
+    alice_seq = msg_alice.seq_id
+
+    # 2. Bob posts a message addressing Charlie WITHOUT calling wait_for_turn first
+    msg_bob = await rm.post_message(sender="@Bob", content="Salut @Charlie, prépare le build.")
+    bob_seq = msg_bob.seq_id
+    assert bob_seq > alice_seq
+
+    # 3. Bob now calls wait_for_turn -> Bob MUST receive Alice's message (alice_seq)
+    bob_res = await rm.wait_for_turn("@Bob", timeout_seconds=0.1)
+    assert len(bob_res.new_messages) == 1
+    assert bob_res.new_messages[0].seq_id == alice_seq
+    assert bob_res.new_messages[0].content == "Salut @Bob, voici la tâche."
+    assert bob_res.new_messages[0].sender == "@Alice"
+
+    # Bob's cursor is now updated to the latest sequence
+    assert rm.participants["@Bob"].last_read_seq_id == rm.seq_counter
+
+    # Calling wait_for_turn again returns no new messages
+    bob_res2 = await rm.wait_for_turn("@Bob", timeout_seconds=0.1)
+    assert len(bob_res2.new_messages) == 0
+

@@ -222,7 +222,7 @@ class RoomManager:
                 name=disp_name,
                 handle=canonical,
                 status="active",
-                last_read_seq_id=self.seq_counter,
+                last_read_seq_id=0,
             )
             self.participants[canonical] = participant
             self.events[canonical] = asyncio.Event()
@@ -235,27 +235,26 @@ class RoomManager:
         if not was_active and active_count >= 2:
             arrival_notice = f"{canonical} est arrivé dans la conversation"
             self.seq_counter += 1
-            all_handles = list(self.participants.keys())
+            other_active = [
+                h for h, p in self.participants.items() if p.status == "active" and h != canonical
+            ]
             msg = Message(
                 seq_id=self.seq_counter,
                 sender="@System",
-                recipients=all_handles,
+                recipients=other_active,
                 content=arrival_notice,
-                is_private=False,
+                is_private=True,
                 timestamp=datetime.now(timezone.utc),
             )
             self.messages.append(msg)
-
-            # Newly joined participant has acknowledged their own arrival
-            participant.last_read_seq_id = self.seq_counter
 
             # Append notice to markdown file
             self._append_to_file(f"> 🔔 **Système :** {arrival_notice}")
 
             # Wake up all currently waiting active participants with this arrival notice so they can greet each other
-            for h, evt in self.events.items():
-                if h != canonical and self.participants.get(h) and self.participants[h].status == "active":
-                    evt.set()
+            for h in other_active:
+                if h in self.events:
+                    self.events[h].set()
 
         # Update file header with new participant / status
         self._update_file_header()
@@ -359,9 +358,6 @@ class RoomManager:
         )
         self.messages.append(msg)
 
-        # Sender has read their own message
-        self.participants[canonical_sender].last_read_seq_id = self.seq_counter
-
         # Format markdown transcript
         time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
         recipients_str = ", ".join(valid_recipients)
@@ -456,18 +452,17 @@ class RoomManager:
         unread: list[Message] = []
         for m in self.messages:
             if m.seq_id > participant.last_read_seq_id:
+                # Do not return sender's own messages
+                if m.sender == canonical:
+                    continue
                 if m.is_private:
-                    if canonical in m.recipients or m.sender == canonical:
+                    if canonical in m.recipients:
                         unread.append(m)
                 else:
                     unread.append(m)
 
-        # Update last_read_seq_id
-        if unread:
-            participant.last_read_seq_id = max(m.seq_id for m in unread)
-        elif self.messages:
-            # If there are messages but none visible/unread to this participant, catch up seq
-            participant.last_read_seq_id = self.seq_counter
+        # Update last_read_seq_id strictly in wait_for_turn
+        participant.last_read_seq_id = self.seq_counter
 
         # Determine status
         if self.active_turn == canonical:

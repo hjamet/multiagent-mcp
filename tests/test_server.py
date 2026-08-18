@@ -182,3 +182,28 @@ async def test_send_message_mention_validation_error():
             timeout_seconds=0.1,
         )
     assert "Écrivez à au moins l'une des personnes suivantes : @Bob" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_join_conversation_delivers_pending_unread_messages(tmp_path: Path):
+    """Test that join_conversation delivers pending unread messages when a participant joins."""
+    file_path = tmp_path / "conv_pending.md"
+    init_conversation(
+        filepath=str(file_path),
+        participants=["@Alice", "@Bob"],
+        topic="Pending messages test",
+    )
+
+    # Alice joins and posts a message targeting Bob
+    await room.join_room("@Alice")
+    await room.post_message(sender="@Alice", content="Hello @Bob, welcome!")
+
+    # Bob joins conversation
+    bob_res = await join_conversation(handle="@Bob")
+
+    # Bob must receive Alice's pending message and have his turn
+    assert len(bob_res.new_messages) == 1
+    assert bob_res.new_messages[0].content == "Hello @Bob, welcome!"
+    assert bob_res.new_messages[0].sender == "@Alice"
+    assert bob_res.status == "your_turn"
+

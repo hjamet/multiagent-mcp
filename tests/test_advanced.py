@@ -51,10 +51,12 @@ async def test_three_agent_turn_sequence(tmp_path: Path):
     # 4. Alice receives turn and her unread messages
     alice_turn = await rm.wait_for_turn("@Alice", timeout_seconds=1.0)
     assert alice_turn.status == "your_turn"
-    # Alice receives Bob's reply (seq 4) + Charlie's reply (seq 5)
-    assert len(alice_turn.new_messages) == 2
-    assert "Je suis prêt @Alice." in alice_turn.new_messages[0].content
-    assert "Moi aussi @Bob !" in alice_turn.new_messages[1].content
+    # Alice receives Bob's arrival (seq 1), Charlie's arrival (seq 2), Bob's reply (seq 4) + Charlie's reply (seq 5)
+    assert len(alice_turn.new_messages) == 4
+    assert "@Bob est arrivé" in alice_turn.new_messages[0].content
+    assert "@Charlie est arrivé" in alice_turn.new_messages[1].content
+    assert "Je suis prêt @Alice." in alice_turn.new_messages[2].content
+    assert "Moi aussi @Bob !" in alice_turn.new_messages[3].content
 
 
 @pytest.mark.asyncio

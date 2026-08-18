@@ -88,18 +88,13 @@ async def join_conversation(
         # First active participant: immediately blocks/waits until another joins or is mentioned
         return await room.wait_for_turn(canonical, timeout_seconds=timeout_seconds)
     else:
-        # Subsequent participant: arrival broadcasted, unblocks waiting agents, return turn state
-        status = "your_turn" if room.active_turn == canonical else "joined"
-        return TurnResult(
-            status=status,
-            active_turn=room.active_turn,
-            new_messages=[],
-            current_queue=list(room.turn_queue),
-            active_participants=[
-                p.handle for p in room.participants.values() if p.status == "active"
-            ],
-            system_notice=f"Joined room. Active participants: {active_count}",
-        )
+        # Subsequent or rejoining participant: fetch pending unread messages immediately
+        turn_res = await room.wait_for_turn(canonical, timeout_seconds=0.0)
+        if turn_res.status not in ("your_turn", "message_received"):
+            turn_res.status = "joined"
+        if not turn_res.system_notice:
+            turn_res.system_notice = f"Joined room. Active participants: {active_count}"
+        return turn_res
 
 
 @mcp.tool()
