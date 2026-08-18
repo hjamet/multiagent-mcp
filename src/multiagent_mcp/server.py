@@ -1,4 +1,10 @@
-"""FastMCP Server for MultiAgentHub room coordination."""
+"""FastMCP Server for MultiAgentHub room coordination.
+
+IMPORTANT POLICY:
+Autonomous agents must NEVER initiate or participate in multi-agent chat rooms
+without explicit user request. This tool suite is strictly reserved for targeted,
+on-demand experiments requested directly by the user.
+"""
 
 import asyncio
 from typing import Optional
@@ -26,6 +32,8 @@ def init_conversation(
     topic: str = "",
 ) -> dict:
     """Initialize a multi-agent conversation room with a markdown transcript file.
+
+    IMPORTANT: Do NOT invoke autonomously. Must only be called upon explicit user request.
 
     Args:
         filepath: Path to the markdown file where transcripts are recorded.
