@@ -161,14 +161,28 @@ async def test_post_message_deduplication_in_turn_queue(tmp_path: Path):
     await rm.join_room("@Bob")
     await rm.join_room("@Charlie")
 
-    # Bob is mentioned 3 times, Charlie once
+    # Bob is mentioned 3 times in same message, Charlie once
     content = "Hello @Bob, check with @Bob please, and also @Bob and @Charlie."
     msg = await rm.post_message(sender="@Alice", content=content)
 
     assert msg.recipients == ["@Bob", "@Charlie"]
-    # First speaker popped into active_turn is @Bob, remaining in queue is @Charlie
+    # Both have score 1, Bob was mentioned first so Bob is active_turn
+    assert rm.priority_scores["@Bob"] == 1
+    assert rm.priority_scores["@Charlie"] == 1
+    assert rm.priority_scores.get("@Alice", 0) == 0
     assert rm.active_turn == "@Bob"
-    assert rm.turn_queue == ["@Charlie"]
+
+    # Bob speaks: Bob's score MUST reset to 0, Charlie gets +1 (score 2)
+    await rm.post_message(sender="@Bob", content="Understood! Checking with @Charlie now.")
+    assert rm.priority_scores["@Bob"] == 0
+    assert rm.priority_scores["@Charlie"] == 2
+    assert rm.active_turn == "@Charlie"
+
+    # Charlie speaks and mentions Alice: Charlie's score MUST reset to 0, Alice gets score 1
+    await rm.post_message(sender="@Charlie", content="All good, back to you @Alice!")
+    assert rm.priority_scores["@Charlie"] == 0
+    assert rm.priority_scores["@Alice"] == 1
+    assert rm.active_turn == "@Alice"
 
 
 @pytest.mark.asyncio

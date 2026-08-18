@@ -18,10 +18,22 @@ class RoomManager:
         self.participants: dict[str, Participant] = {}
         self.events: dict[str, asyncio.Event] = {}
         self.messages: list[Message] = []
-        self.turn_queue: list[str] = []
+        self.priority_scores: dict[str, int] = {}
+        self.mention_seq: dict[str, int] = {}
         self.active_turn: Optional[str] = None
         self.seq_counter: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
+
+    @property
+    def turn_queue(self) -> list[str]:
+        """List of active participants with priority > 0 waiting behind active_turn."""
+        candidates = [h for h, score in self.priority_scores.items() if score > 0]
+        candidates.sort(
+            key=lambda h: (-self.priority_scores.get(h, 0), self.mention_seq.get(h, 0))
+        )
+        if self.active_turn and self.active_turn in candidates:
+            return [h for h in candidates if h != self.active_turn]
+        return candidates
 
     def _strip_code_blocks(self, content: str) -> str:
         """Strip fenced and inline markdown code blocks to avoid false @mentions."""
@@ -103,7 +115,8 @@ class RoomManager:
         self.participants.clear()
         self.events.clear()
         self.messages.clear()
-        self.turn_queue.clear()
+        self.priority_scores.clear()
+        self.mention_seq.clear()
         self.active_turn = None
         self.seq_counter = 0
 
@@ -262,16 +275,33 @@ class RoomManager:
             )
         self._append_to_file(entry)
 
-        # Enqueue deduplicated mentioned agents (+1 score/entry per mentioned agent)
+        # Enqueue deduplicated mentioned agents (+1 score per mentioned agent)
         for target_handle in valid_recipients:
-            self.turn_queue.append(target_handle)
+            self.priority_scores[target_handle] = (
+                self.priority_scores.get(target_handle, 0) + 1
+            )
+            # Only set mention_seq on first enqueue or keep earlier sequence for FIFO if priority was 0
+            if target_handle not in self.mention_seq or self.priority_scores[target_handle] == 1:
+                self.mention_seq[target_handle] = self.seq_counter
 
-        # Pop next speaker from turn queue
-        if self.turn_queue:
-            next_speaker = self.turn_queue.pop(0)
+        # Sender has taken the floor: reset sender priority to 0
+        self.priority_scores[canonical_sender] = 0
+
+        # Elect next speaker: candidate with highest priority_score > 0
+        candidates = [
+            h for h, score in self.priority_scores.items() if score > 0
+        ]
+        if candidates:
+            # Sort by -priority_score (descending), then mention_seq (FIFO)
+            candidates.sort(
+                key=lambda h: (-self.priority_scores.get(h, 0), self.mention_seq.get(h, 0))
+            )
+            next_speaker = candidates[0]
             self.active_turn = next_speaker
             if next_speaker in self.events:
                 self.events[next_speaker].set()
+        else:
+            self.active_turn = None
 
         # If public message, wake up all participants so waiting listeners get unread messages
         if not is_private:
