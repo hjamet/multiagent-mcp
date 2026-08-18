@@ -84,34 +84,18 @@ class RoomManager:
 
         lines = [
             "## 📊 File d'Attente & État des Participants (Temps Réel)",
-            "| Participant | Priorité / Statut | Dernier Message Envoyé |",
-            "|---|---|---|",
+            "| Participant | Statut |",
+            "|---|---|",
         ]
 
         for h in sorted_handles:
             score = self.priority_scores.get(h, 0)
-            if h == self.active_turn:
-                if score > 0:
-                    status_str = f"🎯 **Tour Actif** ({score} mention{'s' if score > 1 else ''})"
-                else:
-                    status_str = "🎯 **Tour Actif**"
-            elif score > 0:
-                status_str = f"⏳ En attente ({score} mention{'s' if score > 1 else ''})"
+            if score > 0:
+                status_str = f"⏳ {score} mention{'s' if score > 1 else ''}"
             else:
-                status_str = "💤 Sleeping (0 mention)"
+                status_str = "💤 sleeping"
 
-            last_msg = self.last_message_by_participant.get(h)
-            if last_msg:
-                time_str = last_msg.timestamp.strftime("%H:%M:%S")
-                snippet = last_msg.content.strip().replace("\n", " ")
-                if len(snippet) > 50:
-                    snippet = snippet[:47] + "..."
-                snippet = snippet.replace("|", "\\|")
-                msg_str = f"*{snippet}* ({time_str})"
-            else:
-                msg_str = "—"
-
-            lines.append(f"| **{h}** | {status_str} | {msg_str} |")
+            lines.append(f"| **{h}** | {status_str} |")
 
         return "\n".join(lines)
 

@@ -286,9 +286,9 @@ async def test_live_header_callout_and_urgency_sorting(tmp_path: Path):
 
     # Check Unified table exists
     assert "## 📊 File d'Attente & État des Participants (Temps Réel)" in content
-    assert "| Participant | Priorité / Statut | Dernier Message Envoyé |" in content
-    assert "🎯 **Tour Actif**" in content or "⏳ En attente" in content
-    assert "💤 Sleeping (0 mention)" in content
+    assert "| Participant | Statut |" in content
+    assert "⏳ 1 mention" in content
+    assert "💤 sleeping" in content
 
     # Extract table section
     table_section = content.split("## 📊 File d'Attente")[1].split("## Fil de discussion")[0]
