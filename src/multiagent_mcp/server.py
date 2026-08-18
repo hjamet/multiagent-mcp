@@ -104,26 +104,8 @@ def list_participants() -> dict:
     Returns:
         Dictionary with participants, active turn, turn queue, and message count.
     """
-    return {
-        "participants": [
-            {
-                "handle": p.handle,
-                "name": p.name,
-                "status": p.status,
-                "joined_at": p.joined_at.isoformat(),
-                "last_read_seq_id": p.last_read_seq_id,
-            }
-            for p in room.participants.values()
-        ],
-        "active_participants": [
-            p.handle for p in room.participants.values() if p.status == "active"
-        ],
-        "active_turn": room.active_turn,
-        "turn_queue": list(room.turn_queue),
-        "message_count": len(room.messages),
-        "topic": room.topic,
-        "filepath": str(room.filepath) if room.filepath else None,
-    }
+    return room.list_participants()
+
 
 
 @mcp.tool()

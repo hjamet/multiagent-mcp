@@ -2,18 +2,30 @@
 
 import asyncio
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
 import re
+import time
 from typing import Optional, Union
 
 from multiagent_mcp.models import Message, Participant, TurnResult, normalize_handle
+
+CONFIG_DIR = Path.home() / ".config" / "multiagent-mcp"
+DEFAULT_STATE_FILE = CONFIG_DIR / "default_room.state.json"
+ACTIVE_POINTER_FILE = CONFIG_DIR / "active_room.json"
 
 
 class RoomManager:
     """Manages multi-agent room participants, turn queue, and markdown transcript."""
 
-    def __init__(self) -> None:
-        self.filepath: Optional[Path] = None
+    def __init__(
+        self,
+        filepath: Optional[Union[str, Path]] = None,
+        state_file: Optional[Union[str, Path]] = None,
+    ) -> None:
+        self.filepath: Optional[Path] = Path(filepath) if filepath else None
+        self._state_file: Optional[Path] = Path(state_file) if state_file else None
         self.topic: str = ""
         self.participants: dict[str, Participant] = {}
         self.events: dict[str, asyncio.Event] = {}
@@ -25,6 +37,146 @@ class RoomManager:
         self.active_turn: Optional[str] = None
         self.seq_counter: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
+
+        if self.filepath and not self._state_file:
+            self._state_file = Path(f"{self.filepath}.state.json")
+
+    def _get_state_file(self) -> Path:
+        """Get the active state file path."""
+        if self._state_file is not None:
+            return self._state_file
+        if self.filepath is not None:
+            self._state_file = Path(f"{self.filepath}.state.json")
+            return self._state_file
+        if ACTIVE_POINTER_FILE.exists():
+            try:
+                data = json.loads(ACTIVE_POINTER_FILE.read_text(encoding="utf-8"))
+                p_str = data.get("state_file")
+                if p_str:
+                    self._state_file = Path(p_str)
+                    return self._state_file
+            except Exception:
+                pass
+        self._state_file = DEFAULT_STATE_FILE
+        return self._state_file
+
+    def _set_active_pointer(self) -> None:
+        """Record active state file in global pointer file."""
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            target = self._get_state_file()
+            ACTIVE_POINTER_FILE.write_text(
+                json.dumps({"state_file": str(target.resolve())}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _save_state(self) -> None:
+        """Atomically persist current room state to JSON file."""
+        state_file = self._get_state_file()
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_data = {
+                "filepath": str(self.filepath.resolve()) if self.filepath else None,
+                "topic": self.topic,
+                "seq_counter": self.seq_counter,
+                "active_turn": self.active_turn,
+                "priority_scores": self.priority_scores,
+                "mention_seq": self.mention_seq,
+                "participants": {
+                    handle: p.model_dump(mode="json")
+                    for handle, p in self.participants.items()
+                },
+                "messages": [
+                    m.model_dump(mode="json")
+                    for m in self.messages
+                ],
+                "last_posted_message": (
+                    self.last_posted_message.model_dump(mode="json")
+                    if self.last_posted_message
+                    else None
+                ),
+            }
+            tmp_file = state_file.with_name(f"{state_file.name}.tmp.{os.getpid()}_{time.time_ns()}")
+            tmp_file.write_text(
+                json.dumps(state_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp_file, state_file)
+        except Exception:
+            try:
+                state_file.write_text(
+                    json.dumps(state_data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+    def _load_state(self) -> bool:
+        """Load and synchronize room state from JSON file if available."""
+        state_file = self._get_state_file()
+        if not state_file.exists():
+            return False
+
+        data = None
+        for attempt in range(5):
+            try:
+                content = state_file.read_text(encoding="utf-8")
+                if not content.strip():
+                    time.sleep(0.02)
+                    continue
+                data = json.loads(content)
+                break
+            except (json.JSONDecodeError, OSError):
+                time.sleep(0.02)
+                continue
+
+        if not data or not isinstance(data, dict):
+            return False
+
+        if data.get("filepath"):
+            self.filepath = Path(data["filepath"])
+        elif "filepath" in data and data["filepath"] is None:
+            self.filepath = None
+
+        self.topic = data.get("topic", "")
+        self.seq_counter = data.get("seq_counter", 0)
+        self.active_turn = data.get("active_turn")
+        self.priority_scores = data.get("priority_scores", {})
+        self.mention_seq = data.get("mention_seq", {})
+
+        loaded_participants = {}
+        for handle, p_dict in data.get("participants", {}).items():
+            try:
+                loaded_participants[handle] = Participant.model_validate(p_dict)
+            except Exception:
+                pass
+        self.participants = loaded_participants
+
+        loaded_messages = []
+        for m_dict in data.get("messages", []):
+            try:
+                loaded_messages.append(Message.model_validate(m_dict))
+            except Exception:
+                pass
+        self.messages = loaded_messages
+
+        last_msg = data.get("last_posted_message")
+        if last_msg:
+            try:
+                self.last_posted_message = Message.model_validate(last_msg)
+            except Exception:
+                self.last_posted_message = None
+        else:
+            self.last_posted_message = None
+
+        self.last_message_by_participant = {}
+        for m in self.messages:
+            if m.sender != "@System":
+                self.last_message_by_participant[m.sender] = m
+
+        return True
 
     def _get_event(self, handle: str) -> asyncio.Event:
         """Get or recreate asyncio.Event bound to the current running event loop."""
@@ -49,6 +201,7 @@ class RoomManager:
     @property
     def turn_queue(self) -> list[str]:
         """List of active participants with priority > 0 waiting behind active_turn."""
+        self._load_state()
         candidates = [
             h
             for h, score in self.priority_scores.items()
@@ -63,16 +216,13 @@ class RoomManager:
 
     def _strip_code_blocks(self, content: str) -> str:
         """Strip fenced and inline markdown code blocks to avoid false @mentions."""
-        # Strip fenced code blocks ```...```
         stripped = re.sub(r"```[\s\S]*?```", "", content)
-        # Strip inline code `...`
         stripped = re.sub(r"`[^`]*`", "", stripped)
         return stripped
 
     def _extract_mentions(self, content: str) -> list[str]:
         """Extract all @mentions from message content outside code blocks."""
         clean_content = self._strip_code_blocks(content)
-        # Match @word or @handle (letters, digits, underscores)
         matches = re.findall(r"@([a-zA-Z0-9_-]+)", clean_content)
         return [normalize_handle(m) for m in matches]
 
@@ -197,8 +347,14 @@ class RoomManager:
         participants: Optional[list[str]] = None,
         topic: str = "",
     ) -> None:
-        """Initialize or reset the room, clear memory, and create markdown file."""
+        """Initialize or reset the room, clear memory, and create markdown and state files."""
         self.filepath = Path(filepath) if filepath else None
+        if self.filepath:
+            self._state_file = Path(f"{self.filepath}.state.json")
+        else:
+            self._state_file = DEFAULT_STATE_FILE
+        self._set_active_pointer()
+
         self.topic = topic
         self.participants.clear()
         self.events.clear()
@@ -223,13 +379,26 @@ class RoomManager:
                 self.priority_scores[canonical] = 0
                 self.mention_seq[canonical] = 0
 
-        # Create fresh file
+        # Create fresh transcript file
         if self.filepath and self.filepath.exists():
-            self.filepath.unlink()
+            try:
+                self.filepath.unlink()
+            except Exception:
+                pass
+
+        # Remove old state file if exists
+        if self._state_file and self._state_file.exists():
+            try:
+                self._state_file.unlink()
+            except Exception:
+                pass
+
         self._update_file_header()
+        self._save_state()
 
     async def join_room(self, handle: str, name: Optional[str] = None) -> Participant:
         """Register a participant in the room and broadcast arrival notice if >= 2 active participants."""
+        self._load_state()
         canonical = normalize_handle(handle)
         disp_name = name if name else canonical.lstrip("@")
 
@@ -279,12 +448,13 @@ class RoomManager:
             # Append notice to markdown file
             self._append_to_file(f"> 🔔 **Système :** {arrival_notice}")
 
-            # Wake up all currently waiting active participants with this arrival notice so they can greet each other
+            # Wake up all currently waiting active participants with this arrival notice
             for h in other_active:
                 self._get_event(h).set()
 
-        # Update file header with new participant / status
+        # Update file header and save state
         self._update_file_header()
+        self._save_state()
 
         return participant
 
@@ -296,6 +466,7 @@ class RoomManager:
         is_private: Optional[Union[list[str], bool]] = None,
     ) -> Message:
         """Post a message to the room with mention validation, turn queueing, and transcript logging."""
+        self._load_state()
         if is_private is not None:
             private = is_private
 
@@ -304,6 +475,7 @@ class RoomManager:
         # Ensure sender is registered and active
         if canonical_sender not in self.participants or self.participants[canonical_sender].status != "active":
             await self.join_room(canonical_sender)
+            self._load_state()
 
         # Extract mentions outside code blocks
         raw_mentions = self._extract_mentions(content)
@@ -414,7 +586,6 @@ class RoomManager:
             self.priority_scores[target_handle] = (
                 self.priority_scores.get(target_handle, 0) + 1
             )
-            # Only set mention_seq on first enqueue or keep earlier sequence for FIFO if priority was 0
             if target_handle not in self.mention_seq or self.priority_scores[target_handle] == 1:
                 self.mention_seq[target_handle] = self.seq_counter
 
@@ -426,7 +597,6 @@ class RoomManager:
             h for h, score in self.priority_scores.items() if score > 0
         ]
         if candidates:
-            # Sort by -priority_score (descending), then mention_seq (FIFO)
             candidates.sort(
                 key=lambda h: (-self.priority_scores.get(h, 0), self.mention_seq.get(h, 0))
             )
@@ -436,15 +606,15 @@ class RoomManager:
         else:
             self.active_turn = None
 
-        # Refresh header file on disk
+        # Refresh header file on disk and save state
         self._update_file_header()
+        self._save_state()
 
-        # If public message, wake up all active participants so waiting listeners get unread messages
+        # Wake up listeners
         if not msg_is_private:
             for h in self.participants.keys():
                 self._get_event(h).set()
         else:
-            # Wake up private recipients
             for r in valid_recipients:
                 self._get_event(r).set()
 
@@ -457,45 +627,67 @@ class RoomManager:
     ) -> TurnResult:
         """Wait for turn or incoming messages for a participant and return unread messages."""
         canonical = normalize_handle(agent_id)
+        self._load_state()
         if canonical not in self.participants:
             raise ValueError(f"Participant {canonical} not registered in room")
 
-        participant = self.participants[canonical]
         evt = self._get_event(canonical)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_seconds)
 
-        # If it's already their turn, no wait needed
-        if self.active_turn != canonical:
+        while True:
+            self._load_state()
+            if canonical not in self.participants:
+                raise ValueError(f"Participant {canonical} not registered in room")
+            participant = self.participants[canonical]
+
+            unread = [
+                m
+                for m in self.messages
+                if m.seq_id > participant.last_read_seq_id
+                and m.sender != canonical
+                and (not m.is_private or canonical in m.recipients)
+            ]
+
+            if self.active_turn == canonical or len(unread) > 0:
+                break
+
+            now = loop.time()
+            remaining = deadline - now
+            if remaining <= 0:
+                break
+
+            poll_interval = min(0.3, remaining)
             evt.clear()
             try:
-                await asyncio.wait_for(evt.wait(), timeout=timeout_seconds)
+                await asyncio.wait_for(evt.wait(), timeout=poll_interval)
             except asyncio.TimeoutError:
                 pass
-            finally:
-                evt.clear()
 
-        # Collect unread messages (seq_id > last_read_seq_id)
-        unread: list[Message] = []
-        for m in self.messages:
-            if m.seq_id > participant.last_read_seq_id:
-                # Do not return sender's own messages
-                if m.sender == canonical:
-                    continue
-                if m.is_private:
-                    if canonical in m.recipients:
-                        unread.append(m)
-                else:
-                    unread.append(m)
+        # Final reload of state
+        self._load_state()
+        if canonical not in self.participants:
+            raise ValueError(f"Participant {canonical} not registered in room")
+        participant = self.participants[canonical]
 
-        # Update last_read_seq_id strictly in wait_for_turn
-        participant.last_read_seq_id = self.seq_counter
+        unread = [
+            m
+            for m in self.messages
+            if m.seq_id > participant.last_read_seq_id
+            and m.sender != canonical
+            and (not m.is_private or canonical in m.recipients)
+        ]
 
-        # Determine status
         if self.active_turn == canonical:
             status = "your_turn"
         elif unread:
             status = "message_received"
         else:
             status = "timeout"
+
+        # Update last_read_seq_id strictly in wait_for_turn and save
+        participant.last_read_seq_id = self.seq_counter
+        self._save_state()
 
         notice = (
             f"Transcript: '{self.filepath}'. Interdiction formelle de consulter ce fichier sur disque."
@@ -511,3 +703,29 @@ class RoomManager:
             active_participants=active_list,
             system_notice=notice,
         )
+
+    def list_participants(self) -> dict:
+        """List active participants, current turn, turn queue, and total messages."""
+        self._load_state()
+        return {
+            "participants": [
+                {
+                    "handle": p.handle,
+                    "name": p.name,
+                    "status": p.status,
+                    "joined_at": p.joined_at.isoformat(),
+                    "last_read_seq_id": p.last_read_seq_id,
+                }
+                for p in self.participants.values()
+            ],
+            "active_participants": [
+                p.handle for p in self.participants.values() if p.status == "active"
+            ],
+            "active_turn": self.active_turn,
+            "turn_queue": list(self.turn_queue),
+            "message_count": len(self.messages),
+            "topic": self.topic,
+            "filepath": str(self.filepath) if self.filepath else None,
+        }
+
+

@@ -139,3 +139,60 @@ async def test_mixed_private_public_with_unjoined_agents(tmp_path: Path):
     assert "### @Bob ➔ " in file_content
     assert "> [!NOTE]" in file_content
     assert "> 💬 **Dernier message :** **@Bob** à" in file_content
+
+
+@pytest.mark.asyncio
+async def test_concurrent_multi_process_conversation_simulation(tmp_path: Path):
+    """Simulate 3 independent processes exchanging messages concurrently via disk state."""
+    room_file = tmp_path / "simulated_cluster.md"
+
+    # Process 1 initializes room
+    p1 = RoomManager(filepath=str(room_file))
+    p1.init_room(
+        filepath=str(room_file),
+        participants=["@Alice", "@Bob", "@Charlie"],
+        topic="Cluster Discussion",
+    )
+    await p1.join_room("@Alice")
+
+    # Process 2 joins
+    p2 = RoomManager(filepath=str(room_file))
+    await p2.join_room("@Bob")
+
+    # Process 3 joins
+    p3 = RoomManager(filepath=str(room_file))
+    await p3.join_room("@Charlie")
+
+    # Catch up arrivals
+    await p1.wait_for_turn("@Alice", timeout_seconds=0.0)
+    await p2.wait_for_turn("@Bob", timeout_seconds=0.0)
+    await p3.wait_for_turn("@Charlie", timeout_seconds=0.0)
+
+    # 1. Alice sends to Bob
+    await p1.post_message(sender="@Alice", content="Salut @Bob !")
+
+    # 2. Bob receives Alice's message, responds to Charlie
+    bob_res = await p2.wait_for_turn("@Bob", timeout_seconds=1.0)
+    assert bob_res.status == "your_turn"
+    assert len(bob_res.new_messages) == 1
+    assert bob_res.new_messages[0].content == "Salut @Bob !"
+
+    await p2.post_message(sender="@Bob", content="Salut @Charlie, Alice a parlé.")
+
+    # 3. Charlie receives Bob's message (and Alice's earlier public message), responds to Alice
+    charlie_res = await p3.wait_for_turn("@Charlie", timeout_seconds=1.0)
+    assert charlie_res.status == "your_turn"
+    assert len(charlie_res.new_messages) == 2
+    assert charlie_res.new_messages[0].content == "Salut @Bob !"
+    assert charlie_res.new_messages[1].content == "Salut @Charlie, Alice a parlé."
+
+    await p3.post_message(sender="@Charlie", content="Bien reçu @Alice !")
+
+
+    # 4. Alice receives Charlie's message
+    alice_res = await p1.wait_for_turn("@Alice", timeout_seconds=1.0)
+    assert alice_res.status == "your_turn"
+    # Alice receives Bob's message and Charlie's message
+    assert len(alice_res.new_messages) == 2
+    assert alice_res.new_messages[1].content == "Bien reçu @Alice !"
+

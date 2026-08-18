@@ -204,8 +204,8 @@ async def test_explicit_private_recipients_list_no_leak(tmp_path: Path):
     await rm.join_room("@Antoine")
 
     # Clear previous read seqs
-    rm.participants["@Antoine"].last_read_seq_id = rm.seq_counter
-    rm.participants["@MJ"].last_read_seq_id = rm.seq_counter
+    await rm.wait_for_turn("@Antoine", timeout_seconds=0.0)
+    await rm.wait_for_turn("@MJ", timeout_seconds=0.0)
 
     # Claire sends private message to MJ discussing Antoine
     content = "Je veux sonder @Antoine discrètement pour connaître son avis."
@@ -245,8 +245,9 @@ async def test_private_message_visibility_and_formatting(tmp_path: Path):
     await rm.join_room("@Charlie")
 
     # Clear previous read seqs
-    rm.participants["@Charlie"].last_read_seq_id = rm.seq_counter
-    rm.participants["@Bob"].last_read_seq_id = rm.seq_counter
+    await rm.wait_for_turn("@Charlie", timeout_seconds=0.0)
+    await rm.wait_for_turn("@Bob", timeout_seconds=0.0)
+
 
     # Alice sends private message to Bob with boolean is_private=True
     await rm.post_message(sender="@Alice", content="Secret message for @Bob", private=True)
@@ -442,4 +443,115 @@ async def test_sender_does_not_lose_earlier_unread_messages_after_posting(tmp_pa
     # Calling wait_for_turn again returns no new messages
     bob_res2 = await rm.wait_for_turn("@Bob", timeout_seconds=0.1)
     assert len(bob_res2.new_messages) == 0
+
+
+@pytest.mark.asyncio
+async def test_state_file_json_structure_and_persistence(tmp_path: Path):
+    """Verify that <filepath>.state.json is created and persists full room state."""
+    import json
+    room_file = tmp_path / "persisted_room.md"
+    state_file = tmp_path / "persisted_room.md.state.json"
+    rm = RoomManager()
+    rm.init_room(
+        filepath=str(room_file),
+        participants=["@Alice", "@Bob"],
+        topic="Persistence Test",
+    )
+
+    assert state_file.exists()
+    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state_data["topic"] == "Persistence Test"
+    assert "@Alice" in state_data["participants"]
+    assert "@Bob" in state_data["participants"]
+    assert state_data["seq_counter"] == 0
+    assert state_data["active_turn"] is None
+    assert state_data["messages"] == []
+
+    # Join and post message
+    await rm.join_room("@Alice")
+    await rm.join_room("@Bob")
+    await rm.post_message(sender="@Alice", content="Salut @Bob, test de persistance !")
+
+    state_data2 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state_data2["seq_counter"] == 2  # 1 arrival notice + 1 post
+    assert state_data2["active_turn"] == "@Bob"
+    assert len(state_data2["messages"]) == 2
+    assert state_data2["messages"][1]["content"] == "Salut @Bob, test de persistance !"
+    assert state_data2["priority_scores"]["@Bob"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_instance_turn_coordination_and_sync(tmp_path: Path):
+    """Simulate two separate processes using independent RoomManager instances."""
+    room_file = tmp_path / "multi_process_sim.md"
+
+    # Instance 1 (Process A)
+    rm_a = RoomManager(filepath=str(room_file))
+    rm_a.init_room(
+        filepath=str(room_file),
+        participants=["@Alice", "@Bob"],
+        topic="Cross-Process Sync",
+    )
+    await rm_a.join_room("@Alice")
+
+    # Instance 2 (Process B)
+    rm_b = RoomManager(filepath=str(room_file))
+    await rm_b.join_room("@Bob")
+
+    # Catch up arrivals
+    await rm_a.wait_for_turn("@Alice", timeout_seconds=0.0)
+    await rm_b.wait_for_turn("@Bob", timeout_seconds=0.0)
+
+    # Process A posts message to Bob
+    await rm_a.post_message(sender="@Alice", content="Action required @Bob")
+
+
+    # Process B waits and catches up
+    res_b = await rm_b.wait_for_turn("@Bob", timeout_seconds=1.0)
+    assert res_b.status == "your_turn"
+    assert len(res_b.new_messages) == 1
+    assert res_b.new_messages[0].content == "Action required @Bob"
+    assert res_b.new_messages[0].sender == "@Alice"
+
+    # Process B replies to Alice
+    await rm_b.post_message(sender="@Bob", content="Done @Alice!")
+
+    # Process A waits and catches up
+    res_a = await rm_a.wait_for_turn("@Alice", timeout_seconds=1.0)
+    assert res_a.status == "your_turn"
+    assert len(res_a.new_messages) == 1
+    assert res_a.new_messages[0].content == "Done @Alice!"
+    assert res_a.new_messages[0].sender == "@Bob"
+
+
+@pytest.mark.asyncio
+async def test_state_recovery_after_simulated_restart(tmp_path: Path):
+    """Test that creating a new RoomManager recovers all state from disk without init_room."""
+    room_file = tmp_path / "restart_room.md"
+
+    # Session 1: init and populate
+    rm1 = RoomManager()
+    rm1.init_room(filepath=str(room_file), topic="Restart Recovery")
+    await rm1.join_room("@Alice")
+    await rm1.join_room("@Bob")
+    await rm1.post_message(sender="@Alice", content="Message 1 @Bob")
+    await rm1.wait_for_turn("@Bob", timeout_seconds=0.1)
+    await rm1.post_message(sender="@Bob", content="Message 2 @Alice")
+
+    # Simulate process termination: rm1 is discarded
+    del rm1
+
+    # Session 2: new RoomManager pointing to same file
+    rm2 = RoomManager(filepath=str(room_file))
+    rm2._load_state()
+
+    assert rm2.topic == "Restart Recovery"
+    assert len(rm2.participants) == 2
+    assert rm2.participants["@Alice"].status == "active"
+    assert rm2.participants["@Bob"].status == "active"
+    assert rm2.active_turn == "@Alice"
+    assert len(rm2.messages) == 3  # arrival + msg1 + msg2
+    assert rm2.last_posted_message is not None
+    assert rm2.last_posted_message.content == "Message 2 @Alice"
+
 

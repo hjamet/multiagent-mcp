@@ -295,3 +295,60 @@ def test_cli_send_private_flag_and_boolean_strings(tmp_path: Path, capsys):
     ])
     assert exit_code == 0
     assert room.last_posted_message.is_private is False
+
+
+def test_cli_file_backed_persistence_across_commands(tmp_path: Path, capsys):
+    """Test full multiagent lifecycle via separate CLI invocations with file persistence."""
+    transcript = tmp_path / "cli_persistent_chat.md"
+    state_file = tmp_path / "cli_persistent_chat.md.state.json"
+
+    # 1. init
+    exit_code = main([
+        "init",
+        "--file", str(transcript),
+        "--participants", "@Alice", "@Bob",
+        "--topic", "CLI Persistence",
+    ])
+    assert exit_code == 0
+    assert state_file.exists()
+
+    # 2. join Alice
+    exit_code = main(["join", "--handle", "@Alice", "--timeout", "0.05"])
+    assert exit_code == 0
+
+    # 3. join Bob
+    exit_code = main(["join", "--handle", "@Bob", "--timeout", "0.05"])
+    assert exit_code == 0
+
+    # 4. send Alice -> Bob
+    capsys.readouterr()
+    exit_code = main([
+        "send",
+        "--sender", "@Alice",
+        "--content", "@Bob Hello from separate CLI process",
+        "--timeout", "0.05",
+    ])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    send_data = json.loads(captured.out)
+    assert send_data["active_turn"] == "@Bob"
+
+    # 5. wait Bob
+    capsys.readouterr()
+    exit_code = main(["wait", "--handle", "@Bob", "--timeout", "0.1"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    wait_data = json.loads(captured.out)
+    assert wait_data["status"] == "your_turn"
+    assert len(wait_data["new_messages"]) >= 1
+    assert "Hello from separate CLI process" in wait_data["new_messages"][-1]["content"]
+
+    # 6. list
+    capsys.readouterr()
+    exit_code = main(["list"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    list_data = json.loads(captured.out)
+    assert list_data["active_turn"] == "@Bob"
+    assert len(list_data["active_participants"]) == 2
+

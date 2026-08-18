@@ -142,8 +142,9 @@ async def test_send_message_private_explicit_recipients():
     await room.join_room("@Charlie")
 
     # Catch up unread seqs
-    room.participants["@Bob"].last_read_seq_id = room.seq_counter
-    room.participants["@Charlie"].last_read_seq_id = room.seq_counter
+    await room.wait_for_turn("@Bob", timeout_seconds=0.0)
+    await room.wait_for_turn("@Charlie", timeout_seconds=0.0)
+
 
     # Alice sends private message targeting only @Bob, even though @Charlie is mentioned in text
     alice_task = asyncio.create_task(
@@ -212,4 +213,38 @@ async def test_join_conversation_delivers_pending_unread_messages(tmp_path: Path
     assert bob_res.new_messages[0].content == "Hello @Bob, welcome!"
     assert bob_res.new_messages[0].sender == "@Alice"
     assert bob_res.status == "your_turn"
+
+
+@pytest.mark.asyncio
+async def test_mcp_state_file_persistence(tmp_path: Path):
+    """Test that MCP tools correctly create and maintain .state.json on disk."""
+    import json
+    file_path = tmp_path / "mcp_persisted_room.md"
+    state_file = tmp_path / "mcp_persisted_room.md.state.json"
+
+    res = init_conversation(
+        filepath=str(file_path),
+        participants=["@Alice", "@Bob"],
+        topic="MCP Persistence Test",
+    )
+    assert res["status"] == "initialized"
+    assert state_file.exists()
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["topic"] == "MCP Persistence Test"
+    assert "@Alice" in state["participants"]
+    assert state["participants"]["@Alice"]["status"] == "not_joined"
+
+    # Join Alice
+    alice_task = asyncio.create_task(
+        join_conversation(handle="@Alice", timeout_seconds=0.1)
+    )
+    await asyncio.sleep(0.05)
+
+    # Check state file shows Alice active
+    state2 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state2["participants"]["@Alice"]["status"] == "active"
+
+    await alice_task
+
 
