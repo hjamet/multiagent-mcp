@@ -676,7 +676,6 @@ class RoomManager:
         text_has_all = "@all" in raw_mentions_lower or "all" in raw_mentions_lower
 
         alias_map = self._get_alias_map()
-        clean_content = self._strip_code_blocks(content)
         msg_is_private = False
         valid_recipients: list[str] = []
 
@@ -726,12 +725,6 @@ class RoomManager:
                 if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
                     valid_recipients.append(target_handle)
 
-            # Check standalone alias mentions in text
-            for alias_key, target_handle in alias_map.items():
-                if target_handle != canonical_sender and target_handle not in valid_recipients:
-                    if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
-                        valid_recipients.append(target_handle)
-
             # Strict mention containment in private message (anti-fuite)
             recipients_str = ", ".join(valid_recipients)
             for m in raw_mentions:
@@ -756,12 +749,6 @@ class RoomManager:
                 target_handle = alias_map.get(rm_str) or alias_map.get(rm.lstrip("@").lower())
                 if target_handle and target_handle != canonical_sender and target_handle not in valid_recipients:
                     valid_recipients.append(target_handle)
-
-            # Check standalone alias mentions in text
-            for alias_key, target_handle in alias_map.items():
-                if target_handle != canonical_sender and target_handle not in valid_recipients:
-                    if re.search(r'(?i)\b' + re.escape(alias_key) + r'\b', clean_content):
-                        valid_recipients.append(target_handle)
 
             # If no specific participant was mentioned, but @all is present, add all other participants
             if not valid_recipients and text_has_all:
