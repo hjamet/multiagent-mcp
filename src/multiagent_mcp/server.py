@@ -7,7 +7,7 @@ on-demand experiments requested directly by the user.
 """
 
 import asyncio
-from typing import Optional
+from typing import Optional, Union
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -61,7 +61,7 @@ async def join_conversation(
 ) -> TurnResult:
     """Join the multi-agent conversation room.
 
-    If you are the first participant in the room, blocks/waits until another
+    If you are the first active participant in the room, blocks/waits until another
     participant joins or mentions you.
     If you are a subsequent participant, broadcasts your arrival, unblocks
     waiting agents, and returns the current turn state.
@@ -75,14 +75,17 @@ async def join_conversation(
         TurnResult containing turn status, active turn, queue, and unread messages.
     """
     canonical = normalize_handle(handle)
-    is_first = len(room.participants) == 0 or (
-        len(room.participants) == 1 and canonical in room.participants
-    )
+    active_before = [
+        h for h, p in room.participants.items() if p.status == "active" and h != canonical
+    ]
+    is_first = len(active_before) == 0
 
     await room.join_room(handle=canonical, name=name)
 
-    if is_first and len(room.participants) <= 1:
-        # First participant: immediately blocks/waits until another joins or is mentioned
+    active_count = sum(1 for p in room.participants.values() if p.status == "active")
+
+    if is_first and active_count <= 1:
+        # First active participant: immediately blocks/waits until another joins or is mentioned
         return await room.wait_for_turn(canonical, timeout_seconds=timeout_seconds)
     else:
         # Subsequent participant: arrival broadcasted, unblocks waiting agents, return turn state
@@ -92,8 +95,10 @@ async def join_conversation(
             active_turn=room.active_turn,
             new_messages=[],
             current_queue=list(room.turn_queue),
-            active_participants=list(room.participants.keys()),
-            system_notice=f"Joined room. Active participants: {len(room.participants)}",
+            active_participants=[
+                p.handle for p in room.participants.values() if p.status == "active"
+            ],
+            system_notice=f"Joined room. Active participants: {active_count}",
         )
 
 
@@ -130,37 +135,43 @@ def list_participants() -> dict:
 async def send_message(
     sender: str,
     content: str,
-    is_private: bool = False,
+    private: Optional[Union[list[str], bool]] = False,
     timeout_seconds: float = 45.0,
+    is_private: Optional[Union[list[str], bool]] = None,
 ) -> TurnResult:
-    """Post a message to the conversation room with mandatory @mentions.
+    """Post a message to the conversation room with mandatory @mentions or private recipients list.
 
     RULES & BEHAVIOR:
-    - Mentions: You MUST include at least one @mention. Only mention participants who are
-      directly addressed or expected to reply. Do NOT tag everyone blindly.
-    - Global Tag: You can use '@all' in a public message (is_private=False) to address everyone
-      and give each participant +1 turn score in the queue.
-    - Private Messages (is_private=True):
-      * You CANNOT mention '@all' in a private message (raises ValueError).
-      * ONLY the participants explicitly mentioned in the message will see it (and ALL mentioned
-        participants will see it).
+    - Public Messages (private=False / None / []):
+      * You MUST include at least one @mention in the content. Only mention participants who are
+        directly addressed or expected to reply.
+      * You can use '@all' in a public message to address everyone and give each participant +1 turn score.
+    - Private Messages (private=['@Recipient'] or private=True):
+      * If private is a list of handles, ONLY the specified handles are recipients and receive +1 priority score.
+        Mentions inside the text body do NOT leak or become recipients.
+      * You CANNOT mention '@all' in a private message or private recipient list (raises ValueError).
+      * ONLY the explicit recipients see the message.
     - Transcript Ban: The live transcript is recorded on disk. It is strictly forbidden to consult
       the transcript file directly (via view_file or shell) unless explicitly instructed by the user.
 
     Args:
         sender: Your participant handle (e.g. '@Alice').
         content: Message content with @mentions (e.g. '@Bob', '@all').
-        is_private: If True, message is only visible to sender and explicitly mentioned recipients.
+        private: List of recipient handles (e.g. ['@MJ']) or bool (True for private, False for public).
         timeout_seconds: Max seconds to wait before yielding turn status.
+        is_private: Optional backward compatibility alias for private.
 
     Returns:
         TurnResult containing turn status and new unread messages upon unblocking.
     """
+    if is_private is not None:
+        private = is_private
+
     canonical_sender = normalize_handle(sender)
     await room.post_message(
         sender=canonical_sender,
         content=content,
-        is_private=is_private,
+        private=private,
     )
 
     return await room.wait_for_turn(

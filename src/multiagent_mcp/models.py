@@ -1,7 +1,7 @@
 """Data models for multiagent-mcp."""
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 

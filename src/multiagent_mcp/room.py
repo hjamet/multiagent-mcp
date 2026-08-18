@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Optional
+from typing import Optional, Union
 
 from multiagent_mcp.models import Message, Participant, TurnResult, normalize_handle
 
@@ -29,7 +29,11 @@ class RoomManager:
     @property
     def turn_queue(self) -> list[str]:
         """List of active participants with priority > 0 waiting behind active_turn."""
-        candidates = [h for h, score in self.priority_scores.items() if score > 0]
+        candidates = [
+            h
+            for h, score in self.priority_scores.items()
+            if score > 0 and self.participants.get(h) and self.participants[h].status == "active"
+        ]
         candidates.sort(
             key=lambda h: (-self.priority_scores.get(h, 0), self.mention_seq.get(h, 0))
         )
@@ -75,10 +79,16 @@ class RoomManager:
     def _format_participants_table(self) -> str:
         """Format the unified live participant & priority queue table sorted by urgency."""
         def sort_key(p_handle: str):
-            is_active = 0 if p_handle == self.active_turn else 1
+            p = self.participants.get(p_handle)
+            status = p.status if p else "active"
             score = self.priority_scores.get(p_handle, 0)
             seq = self.mention_seq.get(p_handle, 999999)
-            return (is_active, -score, seq, p_handle)
+            if status == "active" and score > 0:
+                return (0, -score, seq, p_handle)
+            elif status == "active":
+                return (1, 0, seq, p_handle)
+            else:
+                return (2, 0, 0, p_handle)
 
         sorted_handles = sorted(self.participants.keys(), key=sort_key)
 
@@ -89,11 +99,16 @@ class RoomManager:
         ]
 
         for h in sorted_handles:
-            score = self.priority_scores.get(h, 0)
-            if score > 0:
-                status_str = f"⏳ {score} mention{'s' if score > 1 else ''}"
+            p = self.participants.get(h)
+            status = p.status if p else "active"
+            if status == "not_joined":
+                status_str = "🔌 not joined yet"
             else:
-                status_str = "💤 sleeping"
+                score = self.priority_scores.get(h, 0)
+                if score > 0:
+                    status_str = f"⏳ {score} mention{'s' if score > 1 else ''}"
+                else:
+                    status_str = "💤 sleeping"
 
             lines.append(f"| **{h}** | {status_str} |")
 
@@ -172,10 +187,12 @@ class RoomManager:
                 self.participants[canonical] = Participant(
                     name=canonical.lstrip("@"),
                     handle=canonical,
-                    status="active",
+                    status="not_joined",
                     last_read_seq_id=0,
                 )
                 self.events[canonical] = asyncio.Event()
+                self.priority_scores[canonical] = 0
+                self.mention_seq[canonical] = 0
 
         # Create fresh file
         if self.filepath and self.filepath.exists():
@@ -183,31 +200,39 @@ class RoomManager:
         self._update_file_header()
 
     async def join_room(self, handle: str, name: Optional[str] = None) -> Participant:
-        """Register a participant in the room and broadcast arrival notice if >= 2 participants."""
+        """Register a participant in the room and broadcast arrival notice if >= 2 active participants."""
         canonical = normalize_handle(handle)
         disp_name = name if name else canonical.lstrip("@")
 
+        was_active = False
         if canonical in self.participants:
             participant = self.participants[canonical]
+            was_active = (participant.status == "active")
+            if name:
+                participant.name = disp_name
             participant.status = "active"
             if canonical not in self.events:
                 self.events[canonical] = asyncio.Event()
-            return participant
+            if canonical not in self.priority_scores:
+                self.priority_scores[canonical] = 0
+            if canonical not in self.mention_seq:
+                self.mention_seq[canonical] = 0
+        else:
+            participant = Participant(
+                name=disp_name,
+                handle=canonical,
+                status="active",
+                last_read_seq_id=self.seq_counter,
+            )
+            self.participants[canonical] = participant
+            self.events[canonical] = asyncio.Event()
+            self.priority_scores[canonical] = 0
+            self.mention_seq[canonical] = 0
 
-        participant = Participant(
-            name=disp_name,
-            handle=canonical,
-            status="active",
-            last_read_seq_id=self.seq_counter,
-        )
-        self.participants[canonical] = participant
-        self.events[canonical] = asyncio.Event()
+        active_count = sum(1 for p in self.participants.values() if p.status == "active")
 
-        # Update file header with new participant
-        self._update_file_header()
-
-        # If this is participant >= 2: broadcast arrival notice
-        if len(self.participants) >= 2:
+        # If participant became active and there are at least 2 active participants: broadcast arrival notice
+        if not was_active and active_count >= 2:
             arrival_notice = f"{canonical} est arrivé dans la conversation"
             self.seq_counter += 1
             all_handles = list(self.participants.keys())
@@ -227,10 +252,13 @@ class RoomManager:
             # Append notice to markdown file
             self._append_to_file(f"> 🔔 **Système :** {arrival_notice}")
 
-            # Wake up all currently waiting participants with this arrival notice so they can greet each other
+            # Wake up all currently waiting active participants with this arrival notice so they can greet each other
             for h, evt in self.events.items():
-                if h != canonical:
+                if h != canonical and self.participants.get(h) and self.participants[h].status == "active":
                     evt.set()
+
+        # Update file header with new participant / status
+        self._update_file_header()
 
         return participant
 
@@ -238,38 +266,53 @@ class RoomManager:
         self,
         sender: str,
         content: str,
-        is_private: bool = False,
+        private: Optional[Union[list[str], bool]] = False,
+        is_private: Optional[Union[list[str], bool]] = None,
     ) -> Message:
         """Post a message to the room with mention validation, turn queueing, and transcript logging."""
+        if is_private is not None:
+            private = is_private
+
         canonical_sender = normalize_handle(sender)
 
-        # Ensure sender is registered
-        if canonical_sender not in self.participants:
+        # Ensure sender is registered and active
+        if canonical_sender not in self.participants or self.participants[canonical_sender].status != "active":
             await self.join_room(canonical_sender)
 
         # Extract mentions outside code blocks
         raw_mentions = self._extract_mentions(content)
         raw_mentions_lower = [rm.lower() for rm in raw_mentions]
+        text_has_all = "@all" in raw_mentions_lower or "all" in raw_mentions_lower
 
-        has_all = "@all" in raw_mentions_lower or "all" in raw_mentions_lower
-
-        if is_private and has_all:
-            raise ValueError(
-                "Impossible de mentionner @all dans un message privé. "
-                "Seules les personnes explicitement mentionnées verront ce message "
-                "(et toutes les personnes mentionnées le verront)."
-            )
-
-        # Map lowercase to canonical handle for active participants
         handle_map = {h.lower(): h for h in self.participants.keys()}
-
+        msg_is_private = False
         valid_recipients: list[str] = []
-        if has_all and not is_private:
-            # @all in public message addresses all other participants
-            for h in self.participants.keys():
-                if h != canonical_sender and h not in valid_recipients:
-                    valid_recipients.append(h)
-        else:
+
+        if isinstance(private, list) and len(private) > 0:
+            msg_is_private = True
+            # Reject @all in private list or text
+            if any(normalize_handle(p).lower() in ("@all", "all") for p in private) or text_has_all:
+                raise ValueError(
+                    "Impossible de mentionner @all dans un message privé. "
+                    "Seules les personnes explicitement mentionnées verront ce message "
+                    "(et toutes les personnes mentionnées le verront)."
+                )
+            for p in private:
+                p_canonical = normalize_handle(p)
+                p_lower = p_canonical.lower()
+                if p_lower in handle_map:
+                    target_handle = handle_map[p_lower]
+                    if target_handle != canonical_sender and target_handle not in valid_recipients:
+                        valid_recipients.append(target_handle)
+
+        elif private is True:
+            msg_is_private = True
+            if text_has_all:
+                raise ValueError(
+                    "Impossible de mentionner @all dans un message privé. "
+                    "Seules les personnes explicitement mentionnées verront ce message "
+                    "(et toutes les personnes mentionnées le verront)."
+                )
             for rm in raw_mentions:
                 rm_lower = rm.lower()
                 if rm_lower in handle_map:
@@ -277,7 +320,22 @@ class RoomManager:
                     if target_handle != canonical_sender and target_handle not in valid_recipients:
                         valid_recipients.append(target_handle)
 
-        # Rejection if 0 valid mentions
+        else:
+            # Public message
+            msg_is_private = False
+            if text_has_all:
+                for h in self.participants.keys():
+                    if h != canonical_sender and h not in valid_recipients:
+                        valid_recipients.append(h)
+            else:
+                for rm in raw_mentions:
+                    rm_lower = rm.lower()
+                    if rm_lower in handle_map:
+                        target_handle = handle_map[rm_lower]
+                        if target_handle != canonical_sender and target_handle not in valid_recipients:
+                            valid_recipients.append(target_handle)
+
+        # Rejection if 0 valid mentions / recipients
         if not valid_recipients:
             available_handles = sorted(
                 [h for h in self.participants.keys() if h != canonical_sender]
@@ -296,7 +354,7 @@ class RoomManager:
             sender=canonical_sender,
             recipients=valid_recipients,
             content=content,
-            is_private=is_private,
+            is_private=msg_is_private,
             timestamp=datetime.now(timezone.utc),
         )
         self.messages.append(msg)
@@ -307,7 +365,7 @@ class RoomManager:
         # Format markdown transcript
         time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
         recipients_str = ", ".join(valid_recipients)
-        if is_private:
+        if msg_is_private:
             entry = (
                 f"### 🔒 [Message Privé] {canonical_sender} ➔ {recipients_str} ({time_str})\n\n"
                 f"{content}\n\n"
@@ -325,7 +383,7 @@ class RoomManager:
         self.last_posted_message = msg
         self.last_message_by_participant[canonical_sender] = msg
 
-        # Enqueue deduplicated mentioned agents (+1 score per mentioned agent)
+        # Enqueue deduplicated mentioned recipients (+1 score per recipient)
         for target_handle in valid_recipients:
             self.priority_scores[target_handle] = (
                 self.priority_scores.get(target_handle, 0) + 1
@@ -353,11 +411,11 @@ class RoomManager:
         else:
             self.active_turn = None
 
-        # Refresh header file on disk with newly elected active_turn, updated priorities, and latest message callout
+        # Refresh header file on disk
         self._update_file_header()
 
-        # If public message, wake up all participants so waiting listeners get unread messages
-        if not is_private:
+        # If public message, wake up all active participants so waiting listeners get unread messages
+        if not msg_is_private:
             for h, evt in self.events.items():
                 evt.set()
         else:
@@ -424,11 +482,12 @@ class RoomManager:
             if self.filepath
             else None
         )
+        active_list = [p.handle for p in self.participants.values() if p.status == "active"]
         return TurnResult(
             status=status,
             active_turn=self.active_turn,
             new_messages=unread,
             current_queue=list(self.turn_queue),
-            active_participants=list(self.participants.keys()),
+            active_participants=active_list,
             system_notice=notice,
         )

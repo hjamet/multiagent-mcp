@@ -44,6 +44,7 @@ def test_init_conversation_tool(tmp_path: Path):
     assert result["participants"] == ["@Alice", "@Bob"]
     assert file_path.exists()
     assert "Project Planning" in file_path.read_text(encoding="utf-8")
+    assert "🔌 not joined yet" in file_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -63,6 +64,7 @@ async def test_join_conversation_first_and_subsequent_participants():
     # At this point, Alice is waiting
     assert len(room.participants) == 1
     assert "@Alice" in room.participants
+    assert room.participants["@Alice"].status == "active"
 
     # Second participant Bob joins
     bob_res = await join_conversation(handle="@Bob", name="Bob Builder")
@@ -86,8 +88,9 @@ def test_list_participants_tool():
 
     assert data["topic"] == "Testing"
     assert len(data["participants"]) == 2
-    assert "@Agent1" in data["active_participants"]
-    assert "@Agent2" in data["active_participants"]
+    assert data["participants"][0]["status"] == "not_joined"
+    assert data["participants"][1]["status"] == "not_joined"
+    assert data["active_participants"] == []
     assert data["message_count"] == 0
 
 
@@ -129,6 +132,41 @@ async def test_send_message_blocking_turn_taking(tmp_path: Path):
     assert len(bob_res.new_messages) == 1
     assert bob_res.new_messages[0].content == "All systems operational @Bob!"
     assert bob_res.new_messages[0].sender == "@Alice"
+
+
+@pytest.mark.asyncio
+async def test_send_message_private_explicit_recipients():
+    """Test send_message tool with explicit private recipients list."""
+    await room.join_room("@Alice")
+    await room.join_room("@Bob")
+    await room.join_room("@Charlie")
+
+    # Catch up unread seqs
+    room.participants["@Bob"].last_read_seq_id = room.seq_counter
+    room.participants["@Charlie"].last_read_seq_id = room.seq_counter
+
+    # Alice sends private message targeting only @Bob, even though @Charlie is mentioned in text
+    alice_task = asyncio.create_task(
+        send_message(
+            sender="@Alice",
+            content="Dis @Bob, je veux vérifier un point sur @Charlie",
+            private=["@Bob"],
+            timeout_seconds=0.1,
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    # Bob checks unread messages
+    bob_res = await room.wait_for_turn("@Bob", timeout_seconds=1.0)
+    assert len(bob_res.new_messages) == 1
+    assert bob_res.new_messages[0].is_private is True
+    assert bob_res.new_messages[0].recipients == ["@Bob"]
+
+    # Charlie checks unread messages -> must be empty
+    charlie_res = await room.wait_for_turn("@Charlie", timeout_seconds=0.1)
+    assert len(charlie_res.new_messages) == 0
+
+    await alice_task
 
 
 @pytest.mark.asyncio

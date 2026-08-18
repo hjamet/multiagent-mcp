@@ -90,3 +90,42 @@ async def test_file_transcript_preservation(tmp_path: Path):
     assert "Premier message pour @Bob" in content
     assert "@Charlie est arrivé dans la conversation" in content
     assert "Troisième message pour @Alice" in content
+
+
+@pytest.mark.asyncio
+async def test_mixed_private_public_with_unjoined_agents(tmp_path: Path):
+    """Test scenario with mixed private and public messages with unjoined agents."""
+    room_file = tmp_path / "mixed.md"
+    rm = RoomManager()
+    rm.init_room(
+        filepath=str(room_file),
+        participants=["@Alice", "@Bob", "@Charlie", "@David"],
+        topic="Confidential Strategy",
+    )
+
+    # Alice and Bob join
+    await rm.join_room("@Alice")
+    await rm.join_room("@Bob")
+
+    # Alice sends private message to Bob discussing Charlie and David
+    await rm.post_message(
+        sender="@Alice",
+        content="Hey @Bob, attendons avant de sonder @Charlie et @David.",
+        private=["@Bob"],
+    )
+
+    assert rm.priority_scores["@Bob"] == 1
+    assert rm.priority_scores["@Charlie"] == 0
+    assert rm.priority_scores["@David"] == 0
+
+    # Charlie joins
+    await rm.join_room("@Charlie")
+    # Charlie should not see the private message between Alice and Bob
+    charlie_res = await rm.wait_for_turn("@Charlie", timeout_seconds=0.1)
+    assert len(charlie_res.new_messages) == 0
+
+    # Bob sends public message to all
+    await rm.post_message(sender="@Bob", content="Bienvenue à tous @all !")
+    charlie_turn = await rm.wait_for_turn("@Charlie", timeout_seconds=1.0)
+    assert len(charlie_turn.new_messages) == 1
+    assert "Bienvenue à tous @all !" in charlie_turn.new_messages[0].content
