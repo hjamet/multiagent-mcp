@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Optional, Union
+import uuid
 
 # Immediate Windows UTF-8 reconfiguration
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -207,6 +208,9 @@ def send_request(
     """Send a framed JSON IPC request to the daemon with auto-recovery on connection loss."""
     if payload is None:
         payload = {}
+
+    if action in ("send", "post_message", "send_message") and "client_msg_id" not in payload:
+        payload["client_msg_id"] = str(uuid.uuid4())
 
     active_port = port if port is not None else ensure_daemon(host=host)
 
@@ -419,6 +423,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "sender": normalize_handle(args.sender),
             "content": args.content,
             "private": private_val,
+            "client_msg_id": str(uuid.uuid4()),
         }
         res = send_request("send", payload)
         print(json.dumps(res, indent=2, ensure_ascii=False))

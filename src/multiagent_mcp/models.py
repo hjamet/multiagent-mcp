@@ -34,6 +34,7 @@ class Message(BaseModel):
     """Message sent in a room."""
 
     id: str = Field(default_factory=lambda: str(uuid4()))
+    client_msg_id: Optional[str] = None
     seq_id: int
     sender: str
     recipients: list[str] = Field(default_factory=list)

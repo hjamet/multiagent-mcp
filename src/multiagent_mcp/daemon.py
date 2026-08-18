@@ -271,6 +271,7 @@ class DaemonServer:
         sender: str,
         content: str,
         private: Optional[Union[list[str], bool]] = False,
+        client_msg_id: Optional[str] = None,
     ) -> dict:
         """Post a message, wake other participants, and wait for sender's next turn."""
         self.room._load_state()
@@ -285,6 +286,7 @@ class DaemonServer:
             sender=canonical_sender,
             content=content,
             private=private,
+            client_msg_id=client_msg_id,
         )
         participant.last_read_seq_id = msg.seq_id
 
@@ -365,6 +367,7 @@ class DaemonServer:
                     sender=req.get("sender") or req.get("handle") or "",
                     content=req.get("content", ""),
                     private=req.get("private", False),
+                    client_msg_id=req.get("client_msg_id"),
                 )
             elif action in ("get_messages", "history", "read_messages"):
                 self.room._load_state()

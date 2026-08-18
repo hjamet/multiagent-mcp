@@ -602,6 +602,7 @@ class RoomManager:
         content: str,
         private: Optional[Union[list[str], bool]] = False,
         is_private: Optional[Union[list[str], bool]] = None,
+        client_msg_id: Optional[str] = None,
     ) -> Message:
         """Post a message to the room with mention validation, turn queueing, and transcript logging."""
         self._load_state()
@@ -683,15 +684,43 @@ class RoomManager:
             )
             raise ValueError(error_str)
 
+        # Idempotency & deduplication protection
+        if client_msg_id:
+            for existing_msg in reversed(self.messages):
+                if existing_msg.client_msg_id == client_msg_id:
+                    return existing_msg
+
+        now = datetime.now(timezone.utc)
+        recent_candidates: list[Message] = []
+        if self.last_posted_message:
+            recent_candidates.append(self.last_posted_message)
+        if self.messages:
+            recent_candidates.extend(reversed(self.messages[-5:]))
+
+        for candidate in recent_candidates:
+            if (
+                candidate.sender == canonical_sender
+                and candidate.content == content
+                and candidate.is_private == msg_is_private
+                and sorted(candidate.recipients) == sorted(valid_recipients)
+            ):
+                cand_ts = candidate.timestamp
+                if cand_ts.tzinfo is None:
+                    cand_ts = cand_ts.replace(tzinfo=timezone.utc)
+                time_diff = abs((now - cand_ts).total_seconds())
+                if time_diff < 3.0:
+                    return candidate
+
         # Sequence increment
         self.seq_counter += 1
         msg = Message(
+            client_msg_id=client_msg_id,
             seq_id=self.seq_counter,
             sender=canonical_sender,
             recipients=valid_recipients,
             content=content,
             is_private=msg_is_private,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=now,
         )
         self.messages.append(msg)
 
