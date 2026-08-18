@@ -26,6 +26,26 @@ class RoomManager:
         self.seq_counter: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
 
+    def _get_event(self, handle: str) -> asyncio.Event:
+        """Get or recreate asyncio.Event bound to the current running event loop."""
+        canonical = normalize_handle(handle)
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if canonical not in self.events:
+            self.events[canonical] = asyncio.Event()
+        else:
+            evt = self.events[canonical]
+            if evt._loop is not None and current_loop is not None and evt._loop is not current_loop:
+                is_set = evt.is_set()
+                new_evt = asyncio.Event()
+                if is_set:
+                    new_evt.set()
+                self.events[canonical] = new_evt
+        return self.events[canonical]
+
     @property
     def turn_queue(self) -> list[str]:
         """List of active participants with priority > 0 waiting behind active_turn."""
@@ -220,8 +240,7 @@ class RoomManager:
             if name:
                 participant.name = disp_name
             participant.status = "active"
-            if canonical not in self.events:
-                self.events[canonical] = asyncio.Event()
+            self._get_event(canonical)
             if canonical not in self.priority_scores:
                 self.priority_scores[canonical] = 0
             if canonical not in self.mention_seq:
@@ -234,7 +253,7 @@ class RoomManager:
                 last_read_seq_id=0,
             )
             self.participants[canonical] = participant
-            self.events[canonical] = asyncio.Event()
+            self._get_event(canonical)
             self.priority_scores[canonical] = 0
             self.mention_seq[canonical] = 0
 
@@ -262,8 +281,7 @@ class RoomManager:
 
             # Wake up all currently waiting active participants with this arrival notice so they can greet each other
             for h in other_active:
-                if h in self.events:
-                    self.events[h].set()
+                self._get_event(h).set()
 
         # Update file header with new participant / status
         self._update_file_header()
@@ -414,8 +432,7 @@ class RoomManager:
             )
             next_speaker = candidates[0]
             self.active_turn = next_speaker
-            if next_speaker in self.events:
-                self.events[next_speaker].set()
+            self._get_event(next_speaker).set()
         else:
             self.active_turn = None
 
@@ -424,13 +441,12 @@ class RoomManager:
 
         # If public message, wake up all active participants so waiting listeners get unread messages
         if not msg_is_private:
-            for h, evt in self.events.items():
-                evt.set()
+            for h in self.participants.keys():
+                self._get_event(h).set()
         else:
             # Wake up private recipients
             for r in valid_recipients:
-                if r in self.events:
-                    self.events[r].set()
+                self._get_event(r).set()
 
         return msg
 
@@ -445,10 +461,7 @@ class RoomManager:
             raise ValueError(f"Participant {canonical} not registered in room")
 
         participant = self.participants[canonical]
-        if canonical not in self.events:
-            self.events[canonical] = asyncio.Event()
-
-        evt = self.events[canonical]
+        evt = self._get_event(canonical)
 
         # If it's already their turn, no wait needed
         if self.active_turn != canonical:
